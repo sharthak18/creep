@@ -6,7 +6,9 @@ plugins {
 
 android {
     namespace = "com.creep.screenrecorder"
-    compileSdk = 34
+    // CameraX 1.5.x and androidx.core 1.15+ both declare minCompileSdk 35,
+    // so :app:checkDebugAarMetadata fails if this is 34 or lower.
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.creep.screenrecorder"
