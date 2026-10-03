@@ -148,7 +148,7 @@ class CameraCaptureService : LifecycleService() {
         isActive = true
         isPreviewVisible = true
         try {
-            promoteToForeground(audioCapable = false)
+            promoteToForeground(audio = false)
             ensurePreviewWindow()
             broadcastState()
             bindUseCases()
