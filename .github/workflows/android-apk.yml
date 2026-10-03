@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 jobs:
   build:
@@ -37,7 +38,24 @@ jobs:
           gradle-version: "8.9"
 
       - name: Build debug APK
-        run: gradle --no-daemon :app:assembleDebug
+        id: build_apk
+        run: |
+          set -o pipefail
+          gradle --no-daemon :app:assembleDebug --stacktrace 2>&1 | tee build.log
+
+      - name: Post build log to diagnostics issue
+        if: failure() && steps.build_apk.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "Failing run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            echo '```'
+            tail -n 250 build.log
+            echo '```'
+          } > build-tail.md
+          gh issue comment 4 --repo "${{ github.repository }}" --body-file build-tail.md
 
       - name: Name APK for download
         run: cp app/build/outputs/apk/debug/app-debug.apk ScreenKit.apk
