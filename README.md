@@ -13,7 +13,7 @@ On Android, open the downloaded APK and follow the install prompt. If Android as
 ## Build
 
 - Open the repository in Android Studio with **JDK 17** installed.
-- Install **Android SDK Platform 34** and let Gradle sync.
+- Install **Android SDK Platform 35** (plus build tools 35.0.0) and let Gradle sync.
 - Run the `app` configuration on a device/emulator running **Android 7.0 (API 24) or later**. CameraX device support and available recording qualities vary by hardware.
 
 Build from a terminal with Gradle 8.9 and `gradle :app:assembleDebug`. The repository contains Kotlin DSL build files; it does not currently include the binary Gradle wrapper JAR.
