@@ -52,7 +52,7 @@ import java.util.concurrent.Executor
 /** CameraX foreground service for user-requested camera video and a visible draggable preview. */
 class CameraCaptureService : LifecycleService() {
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val mainExecutor: Executor by lazy { ContextCompat.getMainExecutor(this) }
+    private val cameraExecutor: Executor by lazy { ContextCompat.getMainExecutor(this) }
 
     private var provider: ProcessCameraProvider? = null
     private var previewUseCase: Preview? = null
@@ -217,7 +217,7 @@ class CameraCaptureService : LifecycleService() {
             } catch (error: Exception) {
                 fail("Camera is unavailable or already in use by another app.")
             }
-        }, mainExecutor)
+        }, cameraExecutor)
     }
 
     private fun bindWithProvider(cameraProvider: ProcessCameraProvider, generation: Int) {
@@ -278,7 +278,7 @@ class CameraCaptureService : LifecycleService() {
                 // CameraX 1.5 supports a muted start and Recording.mute() while recording.
                 pending = pending.withAudioEnabled(audioMuted)
             }
-            recording = pending.start(mainExecutor) { event ->
+            recording = pending.start(cameraExecutor) { event ->
                 when (event) {
                     is VideoRecordEvent.Start -> {
                         wantsRecording = false
