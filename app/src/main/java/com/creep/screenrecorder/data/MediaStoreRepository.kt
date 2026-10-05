@@ -5,17 +5,28 @@ import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
 import android.os.Build
-import android.os.Environment
 import android.provider.MediaStore
-import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
+import androidx.documentfile.provider.DocumentFile
 import java.util.Locale
 
-internal enum class CaptureKind(val folder: String, val isVideo: Boolean) {
-    SCREENSHOT("Pictures/ScreenCapture", false),
-    SCREEN_RECORDING("Movies/ScreenCapture", true),
-    CAMERA_RECORDING("Movies/CameraCapture", true)
+internal enum class CaptureKind(val folder: String, val isVideo: Boolean, val displayPrefix: String) {
+    SCREENSHOT("Pictures/ScreenCapture", false, "ScreenCapture"),
+    SCREEN_RECORDING("Movies/ScreenCapture", true, "ScreenCapture"),
+    CAMERA_RECORDING("Movies/CameraCapture", true, "CameraCapture")
+}
+
+internal fun CaptureKind.mimeType(): String = if (isVideo) "video/mp4" else "image/png"
+
+/** Maps a file name back to the capture that produced it. */
+internal fun captureKindForFileName(name: String): CaptureKind? {
+    val lower = name.lowercase(Locale.US)
+    return when {
+        !lower.contains('.') -> null
+        lower.startsWith("screencapture") && lower.endsWith(".png") -> CaptureKind.SCREENSHOT
+        lower.startsWith("screencapture") && lower.endsWith(".mp4") -> CaptureKind.SCREEN_RECORDING
+        lower.startsWith("cameracapture") && lower.endsWith(".mp4") -> CaptureKind.CAMERA_RECORDING
+        else -> null
+    }
 }
 
 internal data class MediaCapture(
@@ -29,56 +40,54 @@ internal data class MediaCapture(
 
 /** MediaStore helpers for ScreenKit-owned captures only; no broad media-library access is needed. */
 internal object MediaStoreRepository {
-    fun createPending(context: Context, kind: CaptureKind, extension: String): Uri? {
-        val displayName = newName(kind, extension)
+    /** Creates a pending MediaStore row, optionally on a specific storage volume (SD card). */
+    fun insertPending(
+        context: Context,
+        kind: CaptureKind,
+        displayName: String,
+        volumeName: String?,
+    ): Uri? {
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
-            put(MediaStore.MediaColumns.MIME_TYPE, if (kind.isVideo) "video/mp4" else "image/png")
+            put(MediaStore.MediaColumns.MIME_TYPE, kind.mimeType())
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 put(MediaStore.MediaColumns.RELATIVE_PATH, kind.folder + "/")
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
-            } else {
-                val base = if (kind.isVideo) {
-                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES)
-                } else {
-                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
+                if (!volumeName.isNullOrBlank()) {
+                    put(MediaStore.MediaColumns.VOLUME_NAME, volumeName)
                 }
-                val directory = File(base, kind.folder.substringAfter('/'))
+            } else {
+                val directory = LegacyStorage.publicDirectory(kind)
                 if (!directory.exists() && !directory.mkdirs()) return null
-                put(MediaStore.MediaColumns.DATA,
-                    File(directory, displayName).absolutePath)
+                put(MediaStore.MediaColumns.DATA, java.io.File(directory, displayName).absolutePath)
             }
         }
-        return runCatching {
-            context.contentResolver.insert(collection(kind), values)
-        }.getOrNull()
+        return runCatching { context.contentResolver.insert(collection(kind), values) }.getOrNull()
     }
 
-    /** Values for CameraX's MediaStoreOutputOptions. CameraX owns the insert/finalize lifecycle. */
-    fun cameraOutputValues(context: Context, kind: CaptureKind): ContentValues {
-        val displayName = newName(kind, ".mp4")
+    /** Values for CameraX's MediaStoreOutputOptions; CameraX owns the insert/finalize lifecycle. */
+    fun cameraOutputValues(context: Context, kind: CaptureKind, displayName: String, volumeName: String?): ContentValues {
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
             put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 put(MediaStore.MediaColumns.RELATIVE_PATH, kind.folder + "/")
+                if (!volumeName.isNullOrBlank()) {
+                    put(MediaStore.MediaColumns.VOLUME_NAME, volumeName)
+                }
             } else {
-                val base = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES)
-                val directory = File(base, kind.folder.substringAfter('/'))
+                val directory = LegacyStorage.publicDirectory(kind)
                 if (!directory.exists()) directory.mkdirs()
-                put(MediaStore.MediaColumns.DATA,
-                    File(directory, displayName).absolutePath)
+                put(MediaStore.MediaColumns.DATA, java.io.File(directory, displayName).absolutePath)
             }
         }
         return values
     }
 
-    fun publish(context: Context, uri: Uri): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return true
-        return runCatching {
-            val values = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
-            context.contentResolver.update(uri, values, null, null) > 0
-        }.getOrDefault(false)
+    fun displayName(kind: CaptureKind, extension: String): String {
+        val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US)
+            .format(java.util.Date())
+        return "${kind.displayPrefix}_$timestamp$extension"
     }
 
     fun delete(context: Context, uri: Uri?) {
@@ -86,11 +95,13 @@ internal object MediaStoreRepository {
         runCatching { context.contentResolver.delete(uri, null, null) }
     }
 
+    /** Library rows: ScreenKit's own MediaStore items plus files in a user-picked folder. */
     fun queryRecent(context: Context, limit: Int = 8): List<MediaCapture> {
         val captures = mutableListOf<MediaCapture>()
         queryCollection(context, CaptureKind.SCREENSHOT, captures)
         queryCollection(context, CaptureKind.SCREEN_RECORDING, captures)
         queryCollection(context, CaptureKind.CAMERA_RECORDING, captures)
+        captures += queryCustomFolder(context)
         return captures.sortedByDescending { it.dateAddedSeconds }.take(limit)
     }
 
@@ -130,9 +141,7 @@ internal object MediaStoreRepository {
                 "${MediaStore.MediaColumns.IS_PENDING} = 0"
             selectionArgs = arrayOf(kind.folder + "/")
         } else {
-            val prefix = if (kind == CaptureKind.CAMERA_RECORDING) "CameraCapture_%"
-                else if (kind == CaptureKind.SCREENSHOT) "ScreenCapture_%"
-                else "ScreenCapture_%"
+            val prefix = "${kind.displayPrefix}_%"
             selection = "${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ?"
             selectionArgs = arrayOf(prefix)
         }
@@ -176,12 +185,25 @@ internal object MediaStoreRepository {
         }
     }
 
-    private fun newName(kind: CaptureKind, extension: String): String {
-        val prefix = when (kind) {
-            CaptureKind.SCREENSHOT, CaptureKind.SCREEN_RECORDING -> "ScreenCapture"
-            CaptureKind.CAMERA_RECORDING -> "CameraCapture"
+    /** Lists captures written into a user-picked folder (SAF), which MediaStore does not index. */
+    private fun queryCustomFolder(context: Context): List<MediaCapture> {
+        if (SettingsStore.saveMode(context) != SaveLocationMode.CUSTOM_FOLDER) return emptyList()
+        val tree = SettingsStore.treeUri(context) ?: return emptyList()
+        val root = runCatching { DocumentFile.fromTreeUri(context, tree) }.getOrNull() ?: return emptyList()
+        val children = runCatching { root.listFiles() }.getOrNull() ?: return emptyList()
+        return children.mapNotNull { document ->
+            val name = document.name ?: return@mapNotNull null
+            val kind = captureKindForFileName(name) ?: return@mapNotNull null
+            if (!document.isFile) return@mapNotNull null
+            val modified = document.lastModified()
+            MediaCapture(
+                uri = document.uri,
+                title = name.substringBeforeLast('.', name),
+                kind = kind,
+                dateAddedSeconds = if (modified > 0L) modified / 1000L
+                    else System.currentTimeMillis() / 1000L,
+                sizeBytes = runCatching { document.length() }.getOrDefault(0L),
+            )
         }
-        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
-        return "${prefix}_${timestamp}${extension}"
     }
 }

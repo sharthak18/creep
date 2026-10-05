@@ -1,7 +1,11 @@
 package com.creep.screenrecorder.ui
 
 import androidx.lifecycle.ViewModel
+import com.creep.screenrecorder.data.CaptureAudioMode
 import com.creep.screenrecorder.data.MediaCapture
+import com.creep.screenrecorder.data.ProjectionScope
+import com.creep.screenrecorder.data.SaveLocationMode
+import com.creep.screenrecorder.data.StorageVolumes
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -19,6 +23,13 @@ internal data class CaptureUiState(
     val microphoneEnabled: Boolean = false,
     val cameraOverlayEnabled: Boolean = false,
     val cameraFacing: CameraFacing = CameraFacing.BACK,
+    val audioMode: CaptureAudioMode = CaptureAudioMode.NONE,
+    val deviceAudioSupported: Boolean = false,
+    val saveMode: SaveLocationMode = SaveLocationMode.MEDIA_DEFAULT,
+    val saveLocationLabel: String = "",
+    val volumes: List<StorageVolumes.VolumeChoice> = emptyList(),
+    val selectedVolume: String? = null,
+    val projectionScope: ProjectionScope = ProjectionScope.ENTIRE_SCREEN,
     val screenSessionActive: Boolean = false,
     val screenRecording: Boolean = false,
     val screenshotInProgress: Boolean = false,

@@ -3,11 +3,16 @@ name: Android APK
 on:
   workflow_dispatch:
   push:
+    branches:
+      # Temporary: build the verification branch on every push so compile
+      # errors surface immediately without publishing a release tag.
+      - "arena/**"
     tags:
       - "v*"
 
 permissions:
   contents: write
+  issues: write
 
 jobs:
   build:
@@ -37,7 +42,35 @@ jobs:
           gradle-version: "8.9"
 
       - name: Build debug APK
-        run: gradle --no-daemon :app:assembleDebug
+        id: build
+        run: |
+          set -o pipefail
+          gradle --no-daemon :app:assembleDebug 2>&1 | tee /tmp/gradle-build.log
+
+      # The Actions log download host is unreachable from the development
+      # sandbox, so publish the compiler output somewhere readable in-band.
+      - name: Post Gradle diagnostics to the temporary issue on failure
+        if: failure() && steps.build.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "Build failed on \`${{ github.ref_name }}\` @ \`${{ github.sha }}\`"
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            echo '### Errors'
+            echo '```text'
+            grep -E '(^| )(e|w): |error:|What went wrong|FAILURE: Build failed|> Task .* FAILED' /tmp/gradle-build.log | head -120 || true
+            echo '```'
+            echo
+            echo '<details><summary>Build log tail</summary>'
+            echo
+            echo '```text'
+            tail -c 30000 /tmp/gradle-build.log
+            echo '```'
+            echo '</details>'
+          } > /tmp/diagnostics.md
+          gh issue comment 4 --body-file /tmp/diagnostics.md
 
       - name: Name APK for download
         run: cp app/build/outputs/apk/debug/app-debug.apk ScreenKit.apk

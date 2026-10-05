@@ -57,12 +57,16 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
+import com.creep.screenrecorder.data.CaptureAudioMode
 import com.creep.screenrecorder.data.CaptureKind
 import com.creep.screenrecorder.data.MediaCapture
+import com.creep.screenrecorder.data.ProjectionScope
+import com.creep.screenrecorder.data.SaveLocationMode
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -105,9 +109,13 @@ internal fun MainScreen(
     onTakeScreenshot: () -> Unit,
     onToggleScreenRecording: () -> Unit,
     onToggleCameraRecording: () -> Unit,
-    onToggleMicrophone: (Boolean) -> Unit,
+    onAudioModeSelected: (CaptureAudioMode) -> Unit,
     onToggleCameraOverlay: (Boolean) -> Unit,
     onCameraFacingSelected: (CameraFacing) -> Unit,
+    onProjectionScopeSelected: (ProjectionScope) -> Unit,
+    onSaveModeSelected: (SaveLocationMode) -> Unit,
+    onVolumeSelected: (String) -> Unit,
+    onPickFolder: () -> Unit,
     onOpenCapture: (MediaCapture) -> Unit,
 ) {
     ScreenKitTheme {
@@ -127,9 +135,11 @@ internal fun MainScreen(
                     onTakeScreenshot = onTakeScreenshot,
                     onToggleScreenRecording = onToggleScreenRecording,
                     onToggleCameraRecording = onToggleCameraRecording,
+                    onProjectionScopeSelected = onProjectionScopeSelected,
                 )
-                AudioCard(state, onToggleMicrophone)
                 CameraCard(state, onToggleCameraOverlay, onCameraFacingSelected)
+                SoundCard(state, onAudioModeSelected)
+                SaveLocationCard(state, onSaveModeSelected, onVolumeSelected, onPickFolder)
                 FloatingControlsCard(state, onEnableOverlay, onDisableOverlay)
                 RecentCaptures(state.recentCaptures, onOpenCapture)
                 PrivacyNote()
@@ -313,6 +323,7 @@ private fun CaptureActions(
     onTakeScreenshot: () -> Unit,
     onToggleScreenRecording: () -> Unit,
     onToggleCameraRecording: () -> Unit,
+    onProjectionScopeSelected: (ProjectionScope) -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         SectionHeading("QUICK ACTIONS", "Capture the screen or camera")
@@ -343,6 +354,8 @@ private fun CaptureActions(
                     emphasized = state.screenRecording,
                     onClick = onToggleScreenRecording,
                 )
+                HorizontalDivider(color = Edge.copy(alpha = 0.7f))
+                CaptureScopeRow(state, onProjectionScopeSelected)
                 HorizontalDivider(color = Edge.copy(alpha = 0.7f))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     ActionIcon(Icons.Filled.PhotoCamera, Lime, "shot")
@@ -392,32 +405,253 @@ private fun CaptureActions(
 }
 
 @Composable
-private fun AudioCard(state: CaptureUiState, onToggleMicrophone: (Boolean) -> Unit) {
+private fun SoundCard(
+    state: CaptureUiState,
+    onAudioModeSelected: (CaptureAudioMode) -> Unit,
+) {
     Card(
         shape = RoundedCornerShape(21.dp),
         colors = CardDefaults.cardColors(containerColor = Panel),
         border = androidx.compose.foundation.BorderStroke(1.dp, Edge),
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            SectionHeading("SOUND", "What goes into the recording")
+            Row(horizontalArrangement = Arrangement.spacedBy(7.dp), modifier = Modifier.fillMaxWidth()) {
+                CaptureAudioMode.values().forEach { mode ->
+                    AudioModeChip(
+                        mode = mode,
+                        selected = state.audioMode == mode,
+                        enabled = !mode.usesDeviceAudio || state.deviceAudioSupported,
+                        onClick = { onAudioModeSelected(mode) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+            Text(
+                text = when {
+                    state.audioMode.usesDeviceAudio && !state.deviceAudioSupported ->
+                        "Device audio needs Android 10 or newer on this phone."
+                    state.audioMode.usesDeviceAudio ->
+                        "Device audio records what this phone plays. Apps that opt out of capture stay silent: calls and most streaming services block it by design."
+                    state.audioMode == CaptureAudioMode.NONE ->
+                        "Recordings have no sound. Pick Microphone for your voice, device audio for the phone's own sound, or both."
+                    else ->
+                        "The microphone is recorded. Screen-recording audio is fixed when the MP4 starts; camera videos can be muted while recording."
+                },
+                color = Muted,
+                fontSize = 10.sp,
+                lineHeight = 14.sp,
+            )
+        }
+    }
+}
+
+@Composable
+private fun AudioModeChip(
+    mode: CaptureAudioMode,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        onClick = onClick,
+        modifier = modifier,
+        enabled = enabled,
+        color = if (selected) Color(0xFF1D2A1F) else PanelRaised,
+        shape = RoundedCornerShape(12.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) Lime else Edge),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 5.dp, vertical = 9.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            ActionIcon(if (state.microphoneEnabled) Icons.Filled.Mic else Icons.Filled.MicOff,
-                if (state.microphoneEnabled) Lime else Muted, "mic")
-            Column(Modifier.padding(start = 12.dp).weight(1f)) {
-                Text("Record microphone", color = SoftWhite, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            Text(
+                text = mode.label,
+                color = if (!enabled) Muted else if (selected) Lime else SoftWhite,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = when {
+                    !enabled -> "Android 10+"
+                    mode.usesDeviceAudio && mode.usesMicrophone -> "mic + device"
+                    mode.usesDeviceAudio -> "phone sound"
+                    mode.usesMicrophone -> "your voice"
+                    else -> "silent"
+                },
+                color = Muted,
+                fontSize = 8.sp,
+                maxLines = 1,
+            )
+        }
+    }
+}
+
+@Composable
+private fun CaptureScopeRow(
+    state: CaptureUiState,
+    onProjectionScopeSelected: (ProjectionScope) -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Icon(Icons.Filled.Videocam, contentDescription = null, tint = Color(0xFF8FE0C1), modifier = Modifier.size(21.dp))
+        Column(Modifier.padding(start = 9.dp).weight(1f)) {
+            Text("Record the whole screen", color = SoftWhite, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                text = if (state.projectionScope == ProjectionScope.ENTIRE_SCREEN) {
+                    "Skips Android 14's “single app” option, which freezes the video when you switch apps"
+                } else {
+                    "Android 14+ will also offer “a single app”; the video freezes once you leave it"
+                },
+                color = Muted,
+                fontSize = 10.sp,
+                lineHeight = 14.sp,
+            )
+        }
+        Switch(
+            checked = state.projectionScope == ProjectionScope.ENTIRE_SCREEN,
+            onCheckedChange = { whole ->
+                onProjectionScopeSelected(
+                    if (whole) ProjectionScope.ENTIRE_SCREEN else ProjectionScope.USER_CHOICE,
+                )
+            },
+        )
+    }
+}
+
+@Composable
+private fun SaveLocationCard(
+    state: CaptureUiState,
+    onSaveModeSelected: (SaveLocationMode) -> Unit,
+    onVolumeSelected: (String) -> Unit,
+    onPickFolder: () -> Unit,
+) {
+    Card(
+        shape = RoundedCornerShape(21.dp),
+        colors = CardDefaults.cardColors(containerColor = Panel),
+        border = androidx.compose.foundation.BorderStroke(1.dp, Edge),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            SectionHeading("SAVE LOCATION", "Choose where screenshots and videos go")
+            Row(horizontalArrangement = Arrangement.spacedBy(7.dp), modifier = Modifier.fillMaxWidth()) {
+                SaveModeChip(
+                    label = "Gallery",
+                    mode = SaveLocationMode.MEDIA_DEFAULT,
+                    selected = state.saveMode,
+                    modifier = Modifier.weight(1f),
+                    onSelected = onSaveModeSelected,
+                )
+                SaveModeChip(
+                    label = "SD card",
+                    mode = SaveLocationMode.MEDIA_VOLUME,
+                    selected = state.saveMode,
+                    modifier = Modifier.weight(1f),
+                    onSelected = onSaveModeSelected,
+                )
+                SaveModeChip(
+                    label = "Folder",
+                    mode = SaveLocationMode.CUSTOM_FOLDER,
+                    selected = state.saveMode,
+                    modifier = Modifier.weight(1f),
+                    onSelected = onSaveModeSelected,
+                )
+            }
+            Surface(color = PanelRaised, shape = RoundedCornerShape(12.dp)) {
                 Text(
-                    "Optional mic audio · screen fixed at start; camera can mute live when enabled",
+                    text = state.saveLocationLabel.ifBlank { "Device gallery" },
+                    modifier = Modifier.padding(horizontal = 11.dp, vertical = 10.dp),
+                    color = Color(0xFFD8E2DB),
+                    fontSize = 11.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (state.saveMode == SaveLocationMode.MEDIA_VOLUME && state.volumes.size > 1) {
+                VolumePicker(state, onVolumeSelected)
+            }
+            if (state.saveMode == SaveLocationMode.CUSTOM_FOLDER) {
+                OutlinedButton(
+                    onClick = onPickFolder,
+                    shape = RoundedCornerShape(13.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Lime),
+                ) {
+                    Icon(Icons.Filled.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        if (state.saveLocationLabel.isBlank()) "Choose folder" else "Change folder",
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+                Text(
+                    "Screenshots and videos are written straight into that folder, including on a removable card. While a recording runs ScreenKit uses free cache space and copies the finished file across.",
                     color = Muted,
                     fontSize = 10.sp,
                     lineHeight = 14.sp,
                 )
             }
-            Switch(
-                checked = state.microphoneEnabled,
-                onCheckedChange = onToggleMicrophone,
-                enabled = !state.screenSessionActive,
-            )
+            if (state.saveMode == SaveLocationMode.MEDIA_VOLUME) {
+                Text(
+                    "Kept in the media library on the chosen volume, so your gallery still indexes it. On Android 9 and older, pick a folder instead.",
+                    color = Muted,
+                    fontSize = 10.sp,
+                    lineHeight = 14.sp,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SaveModeChip(
+    label: String,
+    mode: SaveLocationMode,
+    selected: SaveLocationMode,
+    modifier: Modifier,
+    onSelected: (SaveLocationMode) -> Unit,
+) {
+    val isSelected = selected == mode
+    Surface(
+        onClick = { onSelected(mode) },
+        modifier = modifier,
+        color = if (isSelected) Color(0xFF1D2A1F) else PanelRaised,
+        shape = RoundedCornerShape(12.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, if (isSelected) Lime else Edge),
+    ) {
+        Text(
+            text = label,
+            modifier = Modifier.padding(vertical = 11.dp),
+            color = if (isSelected) Lime else SoftWhite,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+@Composable
+private fun VolumePicker(state: CaptureUiState, onVolumeSelected: (String) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    val label = state.volumes.firstOrNull { it.name == state.selectedVolume }?.label ?: "Choose a volume"
+    Box {
+        OutlinedButton(
+            onClick = { expanded = true },
+            shape = RoundedCornerShape(13.dp),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = Lime),
+        ) {
+            Text(label, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            state.volumes.forEach { volume ->
+                DropdownMenuItem(
+                    text = { Text(if (volume.removable) "${volume.label} (removable)" else volume.label) },
+                    onClick = {
+                        expanded = false
+                        onVolumeSelected(volume.name)
+                    },
+                )
+            }
         }
     }
 }
@@ -455,7 +689,7 @@ private fun CameraCard(
             }
             if (state.cameraPreviewVisible) {
                 Text(
-                    "Camera preview is live. Choose “Entire screen” in Android's prompt to include overlays in a screen recording.",
+                    "Camera preview is live. The bubble's Flip button switches lens while the preview or recording runs.",
                     color = Color(0xFFB5C5BC),
                     fontSize = 11.sp,
                     lineHeight = 16.sp,
@@ -608,7 +842,7 @@ private fun PrivacyNote() {
         Row(Modifier.padding(13.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Filled.Settings, contentDescription = null, tint = Lime, modifier = Modifier.size(19.dp))
             Text(
-                "Android asks you to approve every screen session. Secure/DRM windows can be blank; camera access requires a visible system indicator.",
+                "Android asks you to approve every screen session. Secure/DRM windows come out blank and calls or apps that opt out of audio capture stay silent — no normal app can record those.",
                 modifier = Modifier.padding(start = 10.dp),
                 color = Muted,
                 fontSize = 11.sp,

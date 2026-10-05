@@ -34,6 +34,15 @@
             </intent-filter>
         </activity>
 
+        <!-- Transparent hop that shows Android's consent sheet without opening an app screen. -->
+        <activity
+            android:name=".CaptureRequestActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/Theme.ScreenKit.Transparent" />
+
         <service
             android:name=".services.ScreenCaptureService"
             android:exported="false"
