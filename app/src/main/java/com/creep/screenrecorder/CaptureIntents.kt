@@ -146,12 +146,13 @@ internal object CaptureIntents {
             required += Manifest.permission.WRITE_EXTERNAL_STORAGE
         }
         when (mode) {
-            CaptureContract.MODE_SCREEN_RECORDING ->
+            CaptureContract.MODE_SCREEN_RECORDING -> {
                 if (SettingsStore.audioMode(context).requiresRecordPermission &&
                     !hasPermission(context, Manifest.permission.RECORD_AUDIO)
                 ) {
                     required += Manifest.permission.RECORD_AUDIO
                 }
+            }
             CaptureContract.MODE_CAMERA_RECORDING -> {
                 if (!hasPermission(context, Manifest.permission.CAMERA)) {
                     required += Manifest.permission.CAMERA
@@ -162,14 +163,16 @@ internal object CaptureIntents {
                     required += Manifest.permission.RECORD_AUDIO
                 }
             }
-            CaptureContract.MODE_CAMERA_PREVIEW ->
+            CaptureContract.MODE_CAMERA_PREVIEW -> {
                 if (!hasPermission(context, Manifest.permission.CAMERA)) {
                     required += Manifest.permission.CAMERA
                 }
-            CaptureContract.MODE_MICROPHONE ->
+            }
+            CaptureContract.MODE_MICROPHONE -> {
                 if (!hasPermission(context, Manifest.permission.RECORD_AUDIO)) {
                     required += Manifest.permission.RECORD_AUDIO
                 }
+            }
             else -> Unit
         }
         return required.distinct()

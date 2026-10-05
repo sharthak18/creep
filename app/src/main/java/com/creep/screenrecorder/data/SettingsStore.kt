@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
+import android.os.storage.StorageManager
 import android.provider.DocumentsContract
 import com.creep.screenrecorder.CaptureContract
 
@@ -211,11 +213,11 @@ internal object StorageVolumes {
 
     fun list(context: Context): List<VolumeChoice> {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return emptyList()
-        val manager = context.getSystemService(Context.STORAGE_SERVICE)
-            as? android.os.storage.StorageManager ?: return emptyList()
+        val manager = context.getSystemService(Context.STORAGE_SERVICE) as? StorageManager
+            ?: return emptyList()
         val result = mutableListOf<VolumeChoice>()
         manager.storageVolumes.forEach { volume ->
-            if (volume.state != android.os.Environment.MEDIA_MOUNTED) return@forEach
+            if (volume.state != Environment.MEDIA_MOUNTED) return@forEach
             val name = volume.mediaStoreVolumeName ?: return@forEach
             if (name.isBlank()) return@forEach
             val description = runCatching { volume.getDescription(context) }.getOrNull() ?: name
