@@ -13,6 +13,7 @@ object CaptureContract {
     const val EXTRA_RESULT_CODE = "screenkit.result_code"
     const val EXTRA_RESULT_DATA = "screenkit.result_data"
     const val EXTRA_AUDIO_ENABLED = "screenkit.audio_enabled"
+    const val EXTRA_AUDIO_MODE = "screenkit.audio_mode"
     const val EXTRA_AUDIO_MUTED = "screenkit.audio_muted"
     const val EXTRA_AUDIO_CAPABLE = "screenkit.audio_capable"
     const val EXTRA_CAMERA_FRONT = "screenkit.camera_front"
@@ -24,15 +25,34 @@ object CaptureContract {
     const val ACTION_CAMERA_STATE = "com.creep.screenrecorder.CAMERA_STATE"
     const val ACTION_CAMERA_FINISHED = "com.creep.screenrecorder.CAMERA_FINISHED"
 
+    /** Overlay bubble actions. Each one runs without bringing the main app to the front. */
     const val COMMAND_SCREENSHOT = "screenshot"
     const val COMMAND_TOGGLE_SCREEN_RECORDING = "screen_recording"
     const val COMMAND_TOGGLE_CAMERA_RECORDING = "camera_recording"
     const val COMMAND_TOGGLE_CAMERA_OVERLAY = "camera_overlay"
+    const val COMMAND_FLIP_CAMERA = "flip_camera"
+    const val COMMAND_CYCLE_AUDIO = "cycle_audio"
     const val COMMAND_TOGGLE_AUDIO = "toggle_audio"
     const val COMMAND_OPEN_APP = "open_app"
+    const val COMMAND_HIDE_OVERLAY = "hide_overlay"
+
+    /** Capture modes handled by [CaptureRequestActivity]. */
+    const val MODE_SCREENSHOT = "screenshot"
+    const val MODE_SCREEN_RECORDING = "screen_recording"
+    const val MODE_CAMERA_RECORDING = "camera_recording"
+    const val MODE_CAMERA_PREVIEW = "camera_preview"
+    const val MODE_MICROPHONE = "microphone_on"
 
     const val PREFS_NAME = "screenkit_settings"
     const val PREF_MICROPHONE_ENABLED = "microphone_enabled"
+    const val PREF_AUDIO_MODE = "audio_mode"
     const val PREF_CAMERA_FRONT = "camera_front"
     const val PREF_OVERLAY_ENABLED = "overlay_enabled"
+    const val PREF_OVERLAY_INTRO_SEEN = "overlay_intro_seen"
+    const val PREF_CAMERA_OVERLAY_ENABLED = "camera_overlay_enabled"
+    const val PREF_PROJECTION_SCOPE = "projection_scope"
+    const val PREF_SAVE_MODE = "save_mode"
+    const val PREF_SAVE_VOLUME = "save_volume"
+    const val PREF_SAVE_TREE_URI = "save_tree_uri"
+    const val PREF_SAVE_FOLDER_LABEL = "save_folder_label"
 }

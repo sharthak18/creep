@@ -10,6 +10,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
@@ -27,11 +28,23 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import com.creep.screenrecorder.CaptureContract
+import com.creep.screenrecorder.CaptureIntents
+import com.creep.screenrecorder.CaptureRequestActivity
 import com.creep.screenrecorder.MainActivity
 import com.creep.screenrecorder.R
+import com.creep.screenrecorder.data.CaptureAudioMode
+import com.creep.screenrecorder.data.SettingsStore
 import kotlin.math.abs
 
-/** User-enabled, draggable bubble with explicit capture shortcuts. */
+/**
+ * User-enabled, draggable bubble with explicit capture shortcuts.
+ *
+ * Actions that need no permission and no Android consent sheet (stop a recording, switch camera,
+ * hide the bubble) run right here. Everything else is handed to [CaptureRequestActivity], which
+ * shows Android's prompt over the current app and disappears. Neither path brings the ScreenKit
+ * activity forward, so a screenshot or a recording started from the bubble captures the app the
+ * user was actually looking at.
+ */
 class FloatingOverlayService : Service() {
     private var windowManager: WindowManager? = null
     private var overlayRoot: LinearLayout? = null
@@ -65,6 +78,10 @@ class FloatingOverlayService : Service() {
         const val ACTION_UPDATE = "com.creep.screenrecorder.overlay.UPDATE"
         private const val CHANNEL_ID = "floating_controls"
         private const val NOTIFICATION_ID = 5301
+        private const val BUBBLE_DP = 54
+        private const val CELL_WIDTH_DP = 46
+        private const val CELL_HEIGHT_DP = 48
+        private const val COLUMNS = 4
 
         @Volatile var isRunning: Boolean = false
             private set
@@ -102,8 +119,7 @@ class FloatingOverlayService : Service() {
             ACTION_HIDE -> {
                 removeOverlay()
                 isRunning = false
-                getSharedPreferences(CaptureContract.PREFS_NAME, MODE_PRIVATE).edit()
-                    .putBoolean(CaptureContract.PREF_OVERLAY_ENABLED, false).apply()
+                SettingsStore.setOverlayEnabled(this, false)
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf(startId)
                 return START_NOT_STICKY
@@ -158,18 +174,18 @@ class FloatingOverlayService : Service() {
         try {
             manager.addView(root, params)
         } catch (_: SecurityException) {
-            overlayRoot = null
-            overlayParams = null
-            isRunning = false
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
+            stopAfterOverlayFailure()
         } catch (_: WindowManager.BadTokenException) {
-            overlayRoot = null
-            overlayParams = null
-            isRunning = false
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
+            stopAfterOverlayFailure()
         }
+    }
+
+    private fun stopAfterOverlayFailure() {
+        overlayRoot = null
+        overlayParams = null
+        isRunning = false
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     private fun rebuildOverlay() {
@@ -193,23 +209,30 @@ class FloatingOverlayService : Service() {
         val menu = if (expanded) makeMenu() else null
         val placeMenuBeforeBubble = expanded && params.x > resources.displayMetrics.widthPixels / 2
         if (placeMenuBeforeBubble && menu != null) {
-            root.addView(menu)
-            root.addView(bubble, LinearLayout.LayoutParams(dp(54), dp(54)).apply {
+            root.addView(menu, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                dp(CELL_HEIGHT_DP * 2),
+            ))
+            root.addView(bubble, LinearLayout.LayoutParams(dp(BUBBLE_DP), dp(BUBBLE_DP)).apply {
                 leftMargin = dp(4)
             })
         } else {
-            root.addView(bubble, LinearLayout.LayoutParams(dp(54), dp(54)))
+            root.addView(bubble, LinearLayout.LayoutParams(dp(BUBBLE_DP), dp(BUBBLE_DP)))
             if (menu != null) {
                 root.addView(menu, LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.WRAP_CONTENT,
-                    dp(54),
+                    dp(CELL_HEIGHT_DP * 2),
                 ).apply { leftMargin = dp(4) })
             }
         }
         bubble.setOnTouchListener(makeBubbleTouchListener(root, params))
 
         if (beforeWidth > 0 || expanded) {
-            val estimatedWidth = if (expanded) dp(54 + 4 + 46 * 6 + 12) else dp(54 + 12)
+            val estimatedWidth = if (expanded) {
+                dp(BUBBLE_DP + 4 + CELL_WIDTH_DP * COLUMNS + 12)
+            } else {
+                dp(BUBBLE_DP + 12)
+            }
             val maxX = (resources.displayMetrics.widthPixels - estimatedWidth).coerceAtLeast(0)
             params.x = params.x.coerceIn(0, maxX)
         }
@@ -248,57 +271,192 @@ class FloatingOverlayService : Service() {
             topMargin = dp(3)
             rightMargin = dp(3)
         })
-        bubble.contentDescription = if (recordingNow) "ScreenKit capture active. Tap for controls." else "ScreenKit floating controls"
+        bubble.contentDescription = if (recordingNow) {
+            "ScreenKit capture active. Tap for controls."
+        } else {
+            "ScreenKit floating controls"
+        }
         return bubble
     }
 
+    /** Two rows of four shortcuts so every action fits on a phone without covering the screen. */
     private fun makeMenu(): LinearLayout {
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        val actions = listOf(
-            MenuAction("▧", "Shot", CaptureContract.COMMAND_SCREENSHOT),
-            MenuAction(if (screenRecording) "■" else "●", if (screenRecording) "Stop" else "Screen",
-                CaptureContract.COMMAND_TOGGLE_SCREEN_RECORDING),
-            MenuAction(if (cameraRecording) "■" else "◉", if (cameraRecording) "Stop" else "Camera",
-                CaptureContract.COMMAND_TOGGLE_CAMERA_RECORDING),
-            MenuAction(if (cameraPreview) "◉" else "◎", "Lens", CaptureContract.COMMAND_TOGGLE_CAMERA_OVERLAY),
-            MenuAction(if (microphoneIsEnabled()) "♫" else "×", "Mic", CaptureContract.COMMAND_TOGGLE_AUDIO),
-            MenuAction("⚙", "App", CaptureContract.COMMAND_OPEN_APP),
+        val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val soundActive = SettingsStore.audioMode(this) != CaptureAudioMode.NONE
+        val rows = listOf(
+            listOf(
+                MenuAction("▧", "Shot", CaptureContract.COMMAND_SCREENSHOT, false),
+                MenuAction(
+                    if (screenRecording) "■" else "●",
+                    if (screenRecording) "Stop" else "Screen",
+                    CaptureContract.COMMAND_TOGGLE_SCREEN_RECORDING,
+                    screenRecording,
+                ),
+                MenuAction(
+                    if (cameraRecording) "■" else "◉",
+                    if (cameraRecording) "Stop" else "Camera",
+                    CaptureContract.COMMAND_TOGGLE_CAMERA_RECORDING,
+                    cameraRecording,
+                ),
+                MenuAction(
+                    if (cameraPreview) "◉" else "◎",
+                    "Lens",
+                    CaptureContract.COMMAND_TOGGLE_CAMERA_OVERLAY,
+                    cameraPreview,
+                ),
+            ),
+            listOf(
+                MenuAction("⇄", "Flip", CaptureContract.COMMAND_FLIP_CAMERA, false),
+                MenuAction(soundIcon(), "Sound", CaptureContract.COMMAND_CYCLE_AUDIO, soundActive),
+                MenuAction("⚙", "App", CaptureContract.COMMAND_OPEN_APP, false),
+                MenuAction("✕", "Hide", CaptureContract.COMMAND_HIDE_OVERLAY, false),
+            ),
         )
-        actions.forEach { action ->
-            val button = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER
-                isClickable = true
-                isFocusable = true
-                setPadding(dp(2), dp(2), dp(2), dp(2))
-                background = selectableBackground()
-                setOnClickListener { openMain(action.command) }
+        rows.forEach { actions ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
             }
-            val icon = TextView(this).apply {
-                text = action.icon
-                textSize = 18f
-                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-                setTextColor(if (action.command == CaptureContract.COMMAND_TOGGLE_AUDIO && microphoneIsEnabled())
-                    0xFFB7F36B.toInt() else Color.WHITE)
-                gravity = Gravity.CENTER
-                includeFontPadding = false
+            actions.forEach { action ->
+                row.addView(makeMenuButton(action), LinearLayout.LayoutParams(dp(CELL_WIDTH_DP), dp(CELL_HEIGHT_DP)))
             }
-            button.addView(icon, LinearLayout.LayoutParams(dp(42), dp(27)))
-            val label = TextView(this).apply {
-                text = action.label
-                textSize = 8.5f
-                typeface = Typeface.create("sans-serif", Typeface.BOLD)
-                setTextColor(0xFFC3D0CA.toInt())
-                gravity = Gravity.CENTER
-                includeFontPadding = false
-            }
-            button.addView(label, LinearLayout.LayoutParams(dp(42), dp(15)))
-            row.addView(button, LinearLayout.LayoutParams(dp(46), dp(48)))
+            column.addView(row, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                dp(CELL_HEIGHT_DP),
+            ))
         }
-        return row
+        return column
+    }
+
+    private fun soundIcon(): String = when (SettingsStore.audioMode(this)) {
+        CaptureAudioMode.NONE -> "×"
+        CaptureAudioMode.MICROPHONE -> "♩"
+        CaptureAudioMode.DEVICE -> "♪"
+        CaptureAudioMode.MIXED -> "♫"
+    }
+
+    private fun makeMenuButton(action: MenuAction): LinearLayout {
+        val button = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            isClickable = true
+            isFocusable = true
+            setPadding(dp(2), dp(2), dp(2), dp(2))
+            background = selectableBackground()
+            setOnClickListener { dispatch(action.command) }
+        }
+        val tint = if (action.active) 0xFFB7F36B.toInt() else Color.WHITE
+        val icon = TextView(this).apply {
+            text = action.icon
+            textSize = 17f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            setTextColor(tint)
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+        }
+        button.addView(icon, LinearLayout.LayoutParams(dp(CELL_WIDTH_DP - 4), dp(25)))
+        val label = TextView(this).apply {
+            text = action.label
+            textSize = 8.5f
+            typeface = Typeface.create("sans-serif", Typeface.BOLD)
+            setTextColor(if (action.active) 0xFFB7F36B.toInt() else 0xFFC3D0CA.toInt())
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+        }
+        button.addView(label, LinearLayout.LayoutParams(dp(CELL_WIDTH_DP - 4), dp(14)))
+        return button
+    }
+
+    /**
+     * Runs what the tap asked for. Only actions that need a permission prompt or Android's
+     * screen-share consent go through [CaptureRequestActivity]; the rest stay in this service so
+     * the user stays exactly where they were.
+     */
+    private fun dispatch(command: String) {
+        expanded = false
+        rebuildOverlay()
+        when (command) {
+            CaptureContract.COMMAND_OPEN_APP -> {
+                openMain()
+                return
+            }
+            CaptureContract.COMMAND_HIDE_OVERLAY -> {
+                hideOverlay()
+                return
+            }
+            CaptureContract.COMMAND_FLIP_CAMERA -> {
+                flipCamera()
+                return
+            }
+            CaptureContract.COMMAND_TOGGLE_SCREEN_RECORDING -> if (ScreenCaptureService.isRecording) {
+                CaptureIntents.stopScreenCapture(this)
+                CaptureIntents.toast(this, "Saving the screen recording…")
+                return
+            }
+            CaptureContract.COMMAND_TOGGLE_CAMERA_RECORDING -> if (CameraCaptureService.isRecording) {
+                CaptureIntents.stopCameraCapture(this)
+                return
+            }
+            CaptureContract.COMMAND_TOGGLE_CAMERA_OVERLAY -> if (CameraCaptureService.isPreviewVisible) {
+                CaptureIntents.hideCameraPreview(this)
+                return
+            }
+        }
+        launchRequest(command)
+    }
+
+    private fun launchRequest(command: String) {
+        val intent = Intent(this, CaptureRequestActivity::class.java)
+            .addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS or
+                    Intent.FLAG_ACTIVITY_NO_ANIMATION,
+            )
+            .putExtra(CaptureContract.EXTRA_OVERLAY_COMMAND, command)
+        runCatching { startActivity(intent) }.onFailure {
+            CaptureIntents.toast(this, "ScreenKit could not start that action.")
+        }
+    }
+
+    private fun flipCamera() {
+        val front = !SettingsStore.cameraFront(this)
+        SettingsStore.setCameraFront(this, front)
+        val label = if (front) "Front camera" else "Back camera"
+        when {
+            CameraCaptureService.isRecording ->
+                CaptureIntents.toast(this, "Stop the camera recording before switching cameras.")
+            CameraCaptureService.isActive || CameraCaptureService.isPreviewVisible -> {
+                CaptureIntents.setCameraFacing(this, front)
+                CaptureIntents.toast(this, label)
+            }
+            else -> CaptureIntents.toast(this, "$label selected for the next capture")
+        }
+        refreshServiceState()
+    }
+
+    private fun refreshServiceState() {
+        screenRecording = ScreenCaptureService.isRecording
+        cameraRecording = CameraCaptureService.isRecording
+        cameraPreview = CameraCaptureService.isPreviewVisible
+        rebuildOverlay()
+    }
+
+    private fun hideOverlay() {
+        SettingsStore.setOverlayEnabled(this, false)
+        removeOverlay()
+        isRunning = false
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    private fun openMain() {
+        val intent = Intent(this, MainActivity::class.java)
+            .addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP,
+            )
+        runCatching { startActivity(intent) }
     }
 
     private fun makeBubbleTouchListener(
@@ -351,18 +509,17 @@ class FloatingOverlayService : Service() {
         }
     }
 
-    private fun openMain(command: String) {
-        expanded = false
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val root = overlayRoot ?: return
+        val params = overlayParams ?: return
+        val width = resources.displayMetrics.widthPixels
+        val height = resources.displayMetrics.heightPixels
+        params.x = params.x.coerceIn(0, (width - root.width).coerceAtLeast(0))
+        params.y = params.y.coerceIn(dp(28), (height - root.height - dp(28)).coerceAtLeast(dp(28)))
+        runCatching { windowManager?.updateViewLayout(root, params) }
         rebuildOverlay()
-        val intent = Intent(this, MainActivity::class.java)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            .putExtra(CaptureContract.EXTRA_OVERLAY_COMMAND, command)
-        runCatching { startActivity(intent) }
     }
-
-    private fun microphoneIsEnabled(): Boolean =
-        getSharedPreferences(CaptureContract.PREFS_NAME, MODE_PRIVATE)
-            .getBoolean(CaptureContract.PREF_MICROPHONE_ENABLED, false)
 
     private fun promoteToForeground() {
         val open = PendingIntent.getActivity(
@@ -379,7 +536,7 @@ class FloatingOverlayService : Service() {
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_capture)
             .setContentTitle("ScreenKit floating controls are on")
-            .setContentText("Tap the bubble to capture or open ScreenKit.")
+            .setContentText("Tap the bubble to capture without leaving this app.")
             .setContentIntent(open)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setOngoing(true)
@@ -442,5 +599,5 @@ class FloatingOverlayService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private data class MenuAction(val icon: String, val label: String, val command: String)
+    private data class MenuAction(val icon: String, val label: String, val command: String, val active: Boolean)
 }

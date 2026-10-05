@@ -30,7 +30,9 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.FallbackStrategy
+import androidx.camera.video.FileOutputOptions
 import androidx.camera.video.MediaStoreOutputOptions
+import androidx.camera.video.OutputOptions
 import androidx.camera.video.Quality
 import androidx.camera.video.QualitySelector
 import androidx.camera.video.Recorder
@@ -45,7 +47,11 @@ import com.creep.screenrecorder.CaptureContract
 import com.creep.screenrecorder.MainActivity
 import com.creep.screenrecorder.R
 import com.creep.screenrecorder.data.CaptureKind
+import com.creep.screenrecorder.data.CaptureSink
 import com.creep.screenrecorder.data.MediaStoreRepository
+import com.creep.screenrecorder.data.SaveLocationMode
+import com.creep.screenrecorder.data.SettingsStore
+import java.io.File
 import java.util.Locale
 import java.util.concurrent.Executor
 
@@ -72,6 +78,7 @@ class CameraCaptureService : LifecycleService() {
     private var bindGeneration = 0
     private var recordingStartedAt = 0L
     private var lastOutputUri: Uri? = null
+    private var pendingTempFile: File? = null
 
     private val timerTick = object : Runnable {
         override fun run() {
@@ -126,8 +133,16 @@ class CameraCaptureService : LifecycleService() {
             ACTION_HIDE_PREVIEW -> hidePreview()
             ACTION_START_RECORDING -> beginRecording(intent)
             ACTION_STOP -> stopByUser()
-            ACTION_SET_AUDIO_MUTED -> setAudioMuted(intent.getBooleanExtra(CaptureContract.EXTRA_AUDIO_MUTED, true))
-            ACTION_SET_FACING -> changeFacing(intent.getBooleanExtra(CaptureContract.EXTRA_CAMERA_FRONT, false))
+            ACTION_SET_AUDIO_MUTED -> {
+                setAudioMuted(intent.getBooleanExtra(CaptureContract.EXTRA_AUDIO_MUTED, true))
+                // A settings-only command that arrived after the session ended must not leave an
+                // idle started service behind.
+                if (!sessionActive && !wantsRecording) stopSelf(startId)
+            }
+            ACTION_SET_FACING -> {
+                changeFacing(intent.getBooleanExtra(CaptureContract.EXTRA_CAMERA_FRONT, false))
+                if (!sessionActive && !wantsRecording) stopSelf(startId)
+            }
             else -> stopSelf(startId)
         }
         return START_NOT_STICKY
@@ -179,6 +194,7 @@ class CameraCaptureService : LifecycleService() {
         cameraFront = intent.getBooleanExtra(CaptureContract.EXTRA_CAMERA_FRONT, cameraFront)
         previewWanted = intent.getBooleanExtra(CaptureContract.EXTRA_SHOW_CAMERA_OVERLAY, previewWanted)
         audioCapable = intent.getBooleanExtra(CaptureContract.EXTRA_AUDIO_CAPABLE, false) &&
+            SettingsStore.audioMode(this).usesMicrophone &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
         hasAudioTrack = audioCapable
@@ -266,12 +282,11 @@ class CameraCaptureService : LifecycleService() {
 
     private fun startCameraXRecording(capture: VideoCapture<Recorder>) {
         if (recording != null) return
-        val outputValues = MediaStoreRepository.cameraOutputValues(this, CaptureKind.CAMERA_RECORDING)
-        val options = MediaStoreOutputOptions.Builder(
-            contentResolver,
-            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-        ).setContentValues(outputValues).build()
-
+        val options = buildOutputOptions()
+        if (options == null) {
+            fail("Could not create the camera video in the chosen location.")
+            return
+        }
         try {
             var pending = capture.output.prepareRecording(this, options)
             if (audioCapable) {
@@ -304,11 +319,61 @@ class CameraCaptureService : LifecycleService() {
         }
     }
 
+    /**
+     * CameraX writes to the media library directly, or to a cache file when the user picked a
+     * folder (a SAF folder cannot be a CameraX output target, so it is copied after finalizing).
+     */
+    private fun buildOutputOptions(): OutputOptions? {
+        val requested = SettingsStore.saveMode(this)
+        // Fall back to the gallery when the chosen folder is gone (card removed, grant revoked).
+        val mode = if (requested == SaveLocationMode.CUSTOM_FOLDER && SettingsStore.treeUri(this) == null) {
+            SaveLocationMode.MEDIA_DEFAULT
+        } else {
+            requested
+        }
+        val displayName = MediaStoreRepository.displayName(CaptureKind.CAMERA_RECORDING, ".mp4")
+        return when (mode) {
+            SaveLocationMode.MEDIA_DEFAULT, SaveLocationMode.MEDIA_VOLUME -> {
+                val volume = if (mode == SaveLocationMode.MEDIA_VOLUME) SettingsStore.mediaVolume(this) else null
+                val values = MediaStoreRepository.cameraOutputValues(
+                    this, CaptureKind.CAMERA_RECORDING, displayName, volume,
+                )
+                MediaStoreOutputOptions.Builder(
+                    contentResolver,
+                    MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                ).setContentValues(values).build()
+            }
+            SaveLocationMode.CUSTOM_FOLDER -> {
+                val directory = CaptureSink.cacheDirectory(this)
+                directory.mkdirs()
+                val file = File(directory, displayName)
+                pendingTempFile = file
+                FileOutputOptions.Builder(file).build()
+            }
+        }
+    }
+
     private fun onRecordingFinalized(event: VideoRecordEvent.Finalize) {
         mainHandler.removeCallbacks(timerTick)
-        val uri = event.outputResults.outputUri
-        val success = !event.hasError() && uri != Uri.EMPTY
-        if (!success && uri != Uri.EMPTY) MediaStoreRepository.delete(this, uri)
+        val recordedUri = event.outputResults.outputUri
+        val temp = pendingTempFile
+        pendingTempFile = null
+        var success = !event.hasError() && recordedUri != Uri.EMPTY
+        var uri: Uri? = if (success) recordedUri else null
+        if (success && temp != null) {
+            val sink = CaptureSink.forCompletedFile(this, CaptureKind.CAMERA_RECORDING, temp)
+            val published = sink?.publish(this)
+            if (published == null) {
+                if (sink != null) sink.discard(this) else temp.delete()
+                success = false
+                uri = null
+            } else {
+                uri = published
+            }
+        }
+        if (!success && temp == null && recordedUri != Uri.EMPTY) {
+            MediaStoreRepository.delete(this, recordedUri)
+        }
 
         recording = null
         cameraRecording = false
@@ -322,7 +387,7 @@ class CameraCaptureService : LifecycleService() {
         lastOutputUri = if (success) uri else null
 
         val message = when {
-            success -> "Camera video saved to Movies/CameraCapture."
+            success -> "Camera video saved to ${SettingsStore.describeSaveLocation(this)}."
             event.error == VideoRecordEvent.Finalize.ERROR_INSUFFICIENT_STORAGE ->
                 "Not enough storage to finish the camera video."
             else -> "Camera recording could not be finalized. Please try again."
@@ -369,6 +434,7 @@ class CameraCaptureService : LifecycleService() {
         }
         if (cameraFront == front) return
         cameraFront = front
+        SettingsStore.setCameraFront(this, front)
         if (sessionActive) bindUseCases()
         broadcastState()
     }
@@ -623,6 +689,8 @@ class CameraCaptureService : LifecycleService() {
         isPreviewVisible = false
         recordingStartedAt = 0L
         muted = audioMuted
+        pendingTempFile?.delete()
+        pendingTempFile = null
         mainHandler.removeCallbacks(timerTick)
         releaseWakeLock()
         removePreviewWindow()

@@ -7,7 +7,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -24,8 +23,13 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import com.creep.screenrecorder.data.CaptureAudioMode
 import com.creep.screenrecorder.data.MediaCapture
 import com.creep.screenrecorder.data.MediaStoreRepository
+import com.creep.screenrecorder.data.ProjectionScope
+import com.creep.screenrecorder.data.SaveLocationMode
+import com.creep.screenrecorder.data.SettingsStore
+import com.creep.screenrecorder.data.StorageVolumes
 import com.creep.screenrecorder.services.CameraCaptureService
 import com.creep.screenrecorder.services.FloatingOverlayService
 import com.creep.screenrecorder.services.ScreenCaptureService
@@ -41,6 +45,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var permissionLauncher: ActivityResultLauncher<Array<String>>
     private lateinit var projectionLauncher: ActivityResultLauncher<Intent>
     private lateinit var overlaySettingsLauncher: ActivityResultLauncher<Intent>
+    private lateinit var folderLauncher: ActivityResultLauncher<Uri?>
 
     private var pendingProjectionMode: String? = null
     private var pendingPermissionFlow: String? = null
@@ -49,7 +54,7 @@ class MainActivity : ComponentActivity() {
     private var cameraPreviewSettingsPending = false
     private var overlayAutoStartPending = false
     private var receiverRegistered = false
-    private var showOverlayWelcome by androidx.compose.runtime.mutableStateOf(false)
+    private var showOverlayWelcome by mutableStateOf(false)
 
     private val permissionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -137,17 +142,9 @@ class MainActivity : ComponentActivity() {
                 showMessage("Screen capture was cancelled.")
                 return@registerForActivityResult
             }
-            val prefs = getSharedPreferences(CaptureContract.PREFS_NAME, MODE_PRIVATE)
-            val includeAudio = prefs.getBoolean(CaptureContract.PREF_MICROPHONE_ENABLED, false) &&
-                hasPermission(Manifest.permission.RECORD_AUDIO)
-            val service = Intent(this, ScreenCaptureService::class.java)
-                .setAction(if (mode == "screenshot") ScreenCaptureService.ACTION_SCREENSHOT
-                    else ScreenCaptureService.ACTION_START_RECORDING)
-                .putExtra(CaptureContract.EXTRA_RESULT_CODE, result.resultCode)
-                .putExtra(CaptureContract.EXTRA_RESULT_DATA, data)
-                .putExtra(CaptureContract.EXTRA_AUDIO_ENABLED, includeAudio)
-            runCatching { startCaptureService(service) }
-                .onFailure { showMessage("Could not start screen capture. Please try again.") }
+            if (!CaptureIntents.startScreenCapture(this, mode, result.resultCode, data)) {
+                showMessage("Could not start the screen capture. Please try again.")
+            }
         }
         overlaySettingsLauncher = registerForActivityResult(
             ActivityResultContracts.StartActivityForResult(),
@@ -155,20 +152,32 @@ class MainActivity : ComponentActivity() {
             refreshPermissionSnapshot()
             continueAfterOverlaySettings()
         }
+        folderLauncher = registerForActivityResult(
+            ActivityResultContracts.OpenDocumentTree(),
+        ) { uri ->
+            if (uri == null) {
+                showMessage("No folder was chosen.")
+                return@registerForActivityResult
+            }
+            val persisted = SettingsStore.commitTreeLocation(this, uri, writeGranted = true)
+            if (persisted) {
+                refreshStorageSnapshot()
+                showMessage("Captures will be saved to ${SettingsStore.describeSaveLocation(this)}.")
+            } else {
+                SettingsStore.setSaveMode(this, SaveLocationMode.MEDIA_DEFAULT)
+                refreshStorageSnapshot()
+                showMessage("Android did not keep access to that folder, so the gallery is still used.")
+            }
+        }
 
-        val preferences = getSharedPreferences(CaptureContract.PREFS_NAME, MODE_PRIVATE)
-        val microphoneEnabled = preferences.getBoolean(CaptureContract.PREF_MICROPHONE_ENABLED, false)
-            && hasPermission(Manifest.permission.RECORD_AUDIO)
-        val cameraFront = preferences.getBoolean(CaptureContract.PREF_CAMERA_FRONT, false)
         viewModel.update {
             it.copy(
-                microphoneEnabled = microphoneEnabled,
                 cameraOverlayEnabled = CameraCaptureService.isPreviewVisible,
-                cameraFacing = if (cameraFront) CameraFacing.FRONT else CameraFacing.BACK,
                 overlayEnabled = FloatingOverlayService.isRunning,
             )
         }
         refreshPermissionSnapshot()
+        refreshStorageSnapshot()
         syncServiceStates()
         setContent {
             val state = viewModel.state.collectAsStateWithLifecycle().value
@@ -177,33 +186,37 @@ class MainActivity : ComponentActivity() {
                 showOverlayWelcome = showOverlayWelcome,
                 onDismissOverlayWelcome = {
                     showOverlayWelcome = false
-                    markOverlayIntroSeen()
+                    SettingsStore.markOverlayIntroSeen(this)
                 },
                 onEnableOverlay = {
                     showOverlayWelcome = false
-                    markOverlayIntroSeen()
+                    SettingsStore.markOverlayIntroSeen(this)
                     enableFloatingOverlay()
                 },
                 onDisableOverlay = { disableFloatingOverlay() },
-                onTakeScreenshot = { requestScreenCapture("screenshot") },
+                onTakeScreenshot = { requestScreenCapture(CaptureContract.MODE_SCREENSHOT) },
                 onToggleScreenRecording = { toggleScreenRecording() },
                 onToggleCameraRecording = { toggleCameraRecording() },
-                onToggleMicrophone = { enabled -> setMicrophoneEnabled(enabled) },
+                onAudioModeSelected = { mode -> setAudioMode(mode) },
                 onToggleCameraOverlay = { enabled -> setCameraOverlayEnabled(enabled) },
                 onCameraFacingSelected = { facing -> setCameraFacing(facing) },
+                onProjectionScopeSelected = { scope -> setProjectionScope(scope) },
+                onSaveModeSelected = { mode -> setSaveMode(mode) },
+                onVolumeSelected = { name -> selectVolume(name) },
+                onPickFolder = { pickFolder() },
                 onOpenCapture = { capture -> openCapture(capture) },
             )
         }
 
-        val introAlreadySeen = preferences.getBoolean("overlay_intro_seen", false)
+        val introAlreadySeen = SettingsStore.overlayIntroSeen(this)
         if (!introAlreadySeen && !Settings.canDrawOverlays(this)) {
             showOverlayWelcome = true
         } else if (Settings.canDrawOverlays(this) &&
-            (!introAlreadySeen || preferences.getBoolean(CaptureContract.PREF_OVERLAY_ENABLED, false))) {
-            markOverlayIntroSeen()
+            (!introAlreadySeen || SettingsStore.overlayEnabled(this))
+        ) {
+            SettingsStore.markOverlayIntroSeen(this)
             overlayAutoStartPending = true
         }
-        handleOverlayCommand(intent)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -235,13 +248,14 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         refreshPermissionSnapshot()
+        refreshStorageSnapshot()
         syncServiceStates()
         refreshRecentMedia()
         continueAfterOverlaySettings()
-        val shouldRestoreOverlay = getSharedPreferences(CaptureContract.PREFS_NAME, MODE_PRIVATE)
-            .getBoolean(CaptureContract.PREF_OVERLAY_ENABLED, false)
-        if (overlayAutoStartPending || (shouldRestoreOverlay && Settings.canDrawOverlays(this)
-                && !FloatingOverlayService.isRunning && !overlaySettingsPending)) {
+        val shouldRestoreOverlay = SettingsStore.overlayEnabled(this)
+        if (overlayAutoStartPending || (shouldRestoreOverlay && Settings.canDrawOverlays(this) &&
+                !FloatingOverlayService.isRunning && !overlaySettingsPending)
+        ) {
             overlayAutoStartPending = false
             startFloatingOverlay()
         }
@@ -259,26 +273,11 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         refreshPermissionSnapshot()
+        refreshStorageSnapshot()
         syncServiceStates()
-        handleOverlayCommand(intent)
     }
 
-    private fun handleOverlayCommand(intent: Intent?) {
-        when (intent?.getStringExtra(CaptureContract.EXTRA_OVERLAY_COMMAND)) {
-            CaptureContract.COMMAND_SCREENSHOT -> requestScreenCapture("screenshot")
-            CaptureContract.COMMAND_TOGGLE_SCREEN_RECORDING -> toggleScreenRecording()
-            CaptureContract.COMMAND_TOGGLE_CAMERA_RECORDING -> toggleCameraRecording()
-            CaptureContract.COMMAND_TOGGLE_CAMERA_OVERLAY -> {
-                val enabled = !viewModel.state.value.cameraOverlayEnabled
-                setCameraOverlayEnabled(enabled)
-            }
-            CaptureContract.COMMAND_TOGGLE_AUDIO -> {
-                val enabled = !viewModel.state.value.microphoneEnabled
-                setMicrophoneEnabled(enabled)
-            }
-            CaptureContract.COMMAND_OPEN_APP, null -> Unit
-        }
-    }
+    // ------------------------------------------------------------------ state
 
     private fun refreshPermissionSnapshot() {
         val overlayGranted = Settings.canDrawOverlays(this)
@@ -286,8 +285,7 @@ class MainActivity : ComponentActivity() {
         val microphoneGranted = hasPermission(Manifest.permission.RECORD_AUDIO)
         val notificationsGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
             hasPermission(Manifest.permission.POST_NOTIFICATIONS)
-        val storageGranted = Build.VERSION.SDK_INT > Build.VERSION_CODES.P ||
-            hasPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        val storageGranted = CaptureIntents.canWriteExternalStorage(this)
         viewModel.update { state ->
             state.copy(
                 overlayPermission = overlayGranted,
@@ -296,6 +294,23 @@ class MainActivity : ComponentActivity() {
                 notificationPermission = notificationsGranted,
                 storagePermission = storageGranted,
                 overlayEnabled = overlayGranted && FloatingOverlayService.isRunning,
+            )
+        }
+    }
+
+    private fun refreshStorageSnapshot() {
+        val volumes = StorageVolumes.list(this)
+        viewModel.update { state ->
+            state.copy(
+                audioMode = SettingsStore.audioMode(this),
+                microphoneEnabled = SettingsStore.audioMode(this).usesMicrophone,
+                saveMode = SettingsStore.saveMode(this),
+                saveLocationLabel = SettingsStore.describeSaveLocation(this),
+                volumes = volumes,
+                selectedVolume = SettingsStore.mediaVolume(this),
+                projectionScope = SettingsStore.projectionScope(this),
+                deviceAudioSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q,
+                cameraFacing = if (SettingsStore.cameraFront(this)) CameraFacing.FRONT else CameraFacing.BACK,
             )
         }
     }
@@ -334,10 +349,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // ------------------------------------------------------------------ screen capture
+
     private fun requestScreenCapture(mode: String) {
         val state = viewModel.state.value
         if (state.screenRecording) {
-            if (mode == "screenshot") {
+            if (mode == CaptureContract.MODE_SCREENSHOT) {
                 showMessage("Stop the current screen recording before taking a screenshot.")
             } else {
                 stopScreenRecording()
@@ -349,57 +366,43 @@ class MainActivity : ComponentActivity() {
             return
         }
         pendingProjectionMode = mode
-        val required = buildList {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                !hasPermission(Manifest.permission.POST_NOTIFICATIONS)) {
-                add(Manifest.permission.POST_NOTIFICATIONS)
-            }
-            if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
-                !hasPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
-                add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-            }
-            if (mode == "screen_recording" && state.microphoneEnabled &&
-                !hasPermission(Manifest.permission.RECORD_AUDIO)) {
-                add(Manifest.permission.RECORD_AUDIO)
-            }
-        }
-        runWithPermissions(required, permissionFlow = "screen:$mode") {
+        runWithPermissions(
+            CaptureIntents.requiredPermissions(this, mode),
+            permissionFlow = "screen:$mode",
+        ) {
             continueScreenCaptureAfterPermissions(mode)
         }
     }
 
     private fun continueScreenCaptureAfterPermissions(mode: String) {
-        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
-            !hasPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
+        if (!CaptureIntents.canWriteExternalStorage(this)) {
             pendingProjectionMode = null
             showMessage("Storage permission is needed to save captures on this Android version.")
             return
         }
-        if (mode == "screen_recording" &&
-            getSharedPreferences(CaptureContract.PREFS_NAME, MODE_PRIVATE)
-                .getBoolean(CaptureContract.PREF_MICROPHONE_ENABLED, false) &&
-            !hasPermission(Manifest.permission.RECORD_AUDIO)) {
-            getSharedPreferences(CaptureContract.PREFS_NAME, MODE_PRIVATE).edit()
-                .putBoolean(CaptureContract.PREF_MICROPHONE_ENABLED, false).apply()
-            viewModel.update { it.copy(microphoneEnabled = false, microphonePermission = false) }
-            showMessage("Microphone permission was declined; the screen recording will be silent.")
+        if (mode == CaptureContract.MODE_SCREEN_RECORDING &&
+            SettingsStore.audioMode(this).requiresRecordPermission &&
+            !hasPermission(Manifest.permission.RECORD_AUDIO)
+        ) {
+            SettingsStore.setAudioMode(this, CaptureAudioMode.NONE)
+            viewModel.update { it.copy(audioMode = CaptureAudioMode.NONE, microphonePermission = false) }
+            showMessage("Microphone permission was declined; this recording will be silent.")
         }
         launchProjectionConsent(mode)
     }
 
     private fun launchProjectionConsent(mode: String) {
-        val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
-        if (projectionManager == null) {
+        val consent = CaptureIntents.projectionConsentIntent(this)
+        if (consent == null) {
             pendingProjectionMode = null
             showMessage("Screen capture is not available on this device.")
             return
         }
         pendingProjectionMode = mode
-        runCatching { projectionLauncher.launch(projectionManager.createScreenCaptureIntent()) }
-            .onFailure {
-                pendingProjectionMode = null
-                showMessage("Could not open Android's screen-capture approval prompt.")
-            }
+        runCatching { projectionLauncher.launch(consent) }.onFailure {
+            pendingProjectionMode = null
+            showMessage("Could not open Android's screen-capture approval prompt.")
+        }
     }
 
     private fun toggleScreenRecording() {
@@ -407,38 +410,34 @@ class MainActivity : ComponentActivity() {
         when {
             state.screenRecording -> stopScreenRecording()
             state.screenSessionActive -> showMessage("A screenshot is already being saved.")
-            else -> requestScreenCapture("screen_recording")
+            else -> requestScreenCapture(CaptureContract.MODE_SCREEN_RECORDING)
         }
     }
 
     private fun stopScreenRecording() {
-        runCatching {
-            startService(Intent(this, ScreenCaptureService::class.java).setAction(ScreenCaptureService.ACTION_STOP))
-        }.onFailure { showMessage("Use the ScreenKit capture notification to stop the recording.") }
+        if (!CaptureIntents.stopScreenCapture(this)) {
+            showMessage("Use the ScreenKit capture notification to stop the recording.")
+        }
     }
+
+    // ------------------------------------------------------------------ camera
 
     private fun toggleCameraRecording() {
         val state = viewModel.state.value
         if (state.cameraRecording) {
-            runCatching {
-                startService(Intent(this, CameraCaptureService::class.java).setAction(CameraCaptureService.ACTION_STOP))
-            }.onFailure { showMessage("Use the camera capture notification to stop recording.") }
+            if (!CaptureIntents.stopCameraCapture(this)) {
+                showMessage("Use the camera capture notification to stop recording.")
+            }
             return
         }
         if (state.screenSessionActive) {
             showMessage("Finish the screen capture before starting a camera recording.")
             return
         }
-        val required = buildList {
-            if (!hasPermission(Manifest.permission.CAMERA)) add(Manifest.permission.CAMERA)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                !hasPermission(Manifest.permission.POST_NOTIFICATIONS)) add(Manifest.permission.POST_NOTIFICATIONS)
-            if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
-                !hasPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)) add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-            if (viewModel.state.value.microphoneEnabled &&
-                !hasPermission(Manifest.permission.RECORD_AUDIO)) add(Manifest.permission.RECORD_AUDIO)
-        }
-        runWithPermissions(required, permissionFlow = "camera_recording") {
+        runWithPermissions(
+            CaptureIntents.requiredPermissions(this, CaptureContract.MODE_CAMERA_RECORDING),
+            permissionFlow = "camera_recording",
+        ) {
             continueCameraRecordingAfterPermissions()
         }
     }
@@ -448,41 +447,25 @@ class MainActivity : ComponentActivity() {
             showMessage("Camera permission is required to record video.")
             return
         }
-        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
-            !hasPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
+        if (!CaptureIntents.canWriteExternalStorage(this)) {
             showMessage("Storage permission is needed to save a camera video on this Android version.")
             return
         }
-        if (viewModel.state.value.microphoneEnabled &&
-            !hasPermission(Manifest.permission.RECORD_AUDIO)) {
-            saveMicrophonePreference(false)
+        val audio = SettingsStore.audioMode(this)
+        if (audio.usesMicrophone && !hasPermission(Manifest.permission.RECORD_AUDIO)) {
+            SettingsStore.setAudioMode(this, CaptureAudioMode.NONE)
             showMessage("Microphone access was declined; the camera video will be silent.")
         }
-        startCameraRecording()
-    }
-
-    private fun startCameraRecording() {
-        val state = viewModel.state.value
-        val audioCapable = state.microphoneEnabled && hasPermission(Manifest.permission.RECORD_AUDIO)
-        val intent = Intent(this, CameraCaptureService::class.java)
-            .setAction(CameraCaptureService.ACTION_START_RECORDING)
-            .putExtra(CaptureContract.EXTRA_CAMERA_FRONT, state.cameraFacing == CameraFacing.FRONT)
-            .putExtra(CaptureContract.EXTRA_AUDIO_CAPABLE, audioCapable)
-            .putExtra(CaptureContract.EXTRA_AUDIO_MUTED, !state.microphoneEnabled)
-            .putExtra(CaptureContract.EXTRA_SHOW_CAMERA_OVERLAY, state.cameraOverlayEnabled)
-        runCatching { startCaptureService(intent) }
-            .onFailure { showMessage("Could not start camera capture. Please try again.") }
+        if (!CaptureIntents.startCameraRecording(this)) {
+            showMessage("Could not start camera capture. Please try again.")
+        }
     }
 
     private fun setCameraOverlayEnabled(enabled: Boolean) {
         if (!enabled) {
-            getSharedPreferences(CaptureContract.PREFS_NAME, MODE_PRIVATE).edit()
-                .putBoolean("camera_overlay_enabled", false).apply()
+            SettingsStore.setCameraOverlayEnabled(this, false)
             viewModel.update { it.copy(cameraOverlayEnabled = false, cameraPreviewVisible = false) }
-            runCatching {
-                startService(Intent(this, CameraCaptureService::class.java)
-                    .setAction(CameraCaptureService.ACTION_HIDE_PREVIEW))
-            }
+            CaptureIntents.hideCameraPreview(this)
             return
         }
         if (viewModel.state.value.cameraPreviewVisible) return
@@ -491,12 +474,10 @@ class MainActivity : ComponentActivity() {
             requestOverlaySettings()
             return
         }
-        val required = buildList {
-            if (!hasPermission(Manifest.permission.CAMERA)) add(Manifest.permission.CAMERA)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                !hasPermission(Manifest.permission.POST_NOTIFICATIONS)) add(Manifest.permission.POST_NOTIFICATIONS)
-        }
-        runWithPermissions(required, permissionFlow = "camera_preview") {
+        runWithPermissions(
+            CaptureIntents.requiredPermissions(this, CaptureContract.MODE_CAMERA_PREVIEW),
+            permissionFlow = "camera_preview",
+        ) {
             continueCameraPreviewAfterPermissions()
         }
     }
@@ -515,94 +496,126 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startCameraPreview() {
-        val facing = viewModel.state.value.cameraFacing
-        val intent = Intent(this, CameraCaptureService::class.java)
-            .setAction(CameraCaptureService.ACTION_SHOW_PREVIEW)
-            .putExtra(CaptureContract.EXTRA_CAMERA_FRONT, facing == CameraFacing.FRONT)
-        runCatching { startCaptureService(intent) }
-            .onSuccess {
-                getSharedPreferences(CaptureContract.PREFS_NAME, MODE_PRIVATE).edit()
-                    .putBoolean("camera_overlay_enabled", true).apply()
-                viewModel.update { it.copy(cameraOverlayEnabled = true) }
-            }
-            .onFailure { showMessage("Could not start the live camera overlay.") }
+        val front = SettingsStore.cameraFront(this)
+        if (CaptureIntents.startCameraPreview(this, front)) {
+            SettingsStore.setCameraOverlayEnabled(this, true)
+            viewModel.update { it.copy(cameraOverlayEnabled = true) }
+        } else {
+            showMessage("Could not start the live camera overlay.")
+        }
     }
 
     private fun setCameraFacing(facing: CameraFacing) {
         val front = facing == CameraFacing.FRONT
-        getSharedPreferences(CaptureContract.PREFS_NAME, MODE_PRIVATE).edit()
-            .putBoolean(CaptureContract.PREF_CAMERA_FRONT, front).apply()
+        SettingsStore.setCameraFront(this, front)
         viewModel.setCameraFacing(facing)
-        if (viewModel.state.value.cameraPreviewVisible && !viewModel.state.value.cameraRecording) {
-            runCatching {
-                startService(Intent(this, CameraCaptureService::class.java)
-                    .setAction(CameraCaptureService.ACTION_SET_FACING)
-                    .putExtra(CaptureContract.EXTRA_CAMERA_FRONT, front))
-            }
+        if (CameraCaptureService.isActive && !CameraCaptureService.isRecording) {
+            CaptureIntents.setCameraFacing(this, front)
         }
     }
 
-    private fun setMicrophoneEnabled(enabled: Boolean) {
-        val current = viewModel.state.value
-        if (current.screenSessionActive) {
-            showMessage("Screen-capture audio is fixed at the start of a recording; this setting applies next time.")
+    // ------------------------------------------------------------------ audio
+
+    private fun setAudioMode(requested: CaptureAudioMode) {
+        if (requested.usesDeviceAudio && Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            showMessage("Device audio needs Android 10 or newer.")
             return
         }
-        if (enabled && (current.cameraRecording || CameraCaptureService.isStartingRecording) &&
-            !CameraCaptureService.hasAudioTrack) {
-            showMessage("Microphone audio was not enabled for this camera video. Stop and restart with Record Audio enabled.")
-            return
-        }
-        if (enabled && !hasPermission(Manifest.permission.RECORD_AUDIO)) {
+        if (requested.requiresRecordPermission && !hasPermission(Manifest.permission.RECORD_AUDIO)) {
             runWithPermissions(
                 listOf(Manifest.permission.RECORD_AUDIO),
-                permissionFlow = "microphone_on",
+                permissionFlow = "audio_mode:${requested.id}",
             ) {
-                continueEnableMicrophone()
+                applyAudioMode(requested)
             }
             return
         }
-        saveMicrophonePreference(enabled)
-        applyLiveAudioPreference(enabled)
+        applyAudioMode(requested)
     }
 
-    private fun continueEnableMicrophone() {
-        if ((viewModel.state.value.cameraRecording || CameraCaptureService.isStartingRecording) &&
-            !CameraCaptureService.hasAudioTrack) {
-            showMessage("Microphone audio was not enabled for this camera video. Stop and restart with Record Audio enabled.")
-            return
-        }
-        if (!hasPermission(Manifest.permission.RECORD_AUDIO)) {
-            showMessage("Microphone access was not granted.")
-            viewModel.update { it.copy(microphoneEnabled = false, microphonePermission = false) }
-            return
-        }
-        saveMicrophonePreference(true)
-        applyLiveAudioPreference(true)
-    }
-
-    private fun saveMicrophonePreference(enabled: Boolean) {
-        getSharedPreferences(CaptureContract.PREFS_NAME, MODE_PRIVATE).edit()
-            .putBoolean(CaptureContract.PREF_MICROPHONE_ENABLED, enabled).apply()
-        viewModel.update { it.copy(microphoneEnabled = enabled, microphonePermission = hasPermission(Manifest.permission.RECORD_AUDIO)) }
-    }
-
-    private fun applyLiveAudioPreference(enabled: Boolean) {
-        val state = viewModel.state.value
-        if (state.cameraSessionActive) {
-            runCatching {
-                startService(Intent(this, CameraCaptureService::class.java)
-                    .setAction(CameraCaptureService.ACTION_SET_AUDIO_MUTED)
-                    .putExtra(CaptureContract.EXTRA_AUDIO_MUTED, !enabled))
+    private fun applyAudioMode(requested: CaptureAudioMode) {
+        val applied = CaptureIntents.effectiveAudioMode(this, requested)
+        SettingsStore.setAudioMode(this, applied)
+        when {
+            applied != requested ->
+                showMessage("Microphone permission is off, so sound was set to ${applied.label}.")
+            viewModel.state.value.screenSessionActive ->
+                showMessage("Screen-recording audio is fixed when the MP4 starts; this applies next time.")
+            else -> {
+                if (CameraCaptureService.isActive) {
+                    CaptureIntents.setCameraAudioMuted(this, !applied.usesMicrophone)
+                }
+                if (applied.usesDeviceAudio) {
+                    showMessage("Sound: ${applied.label}. Apps that opt out of capture stay silent in the video.")
+                }
             }
         }
-        if (state.screenRecording) {
-            showMessage("Screen-recording audio is fixed when the MP4 starts; this setting applies to the next recording.")
+        refreshStorageSnapshot()
+    }
+
+    // ------------------------------------------------------------------ save location
+
+    private fun setSaveMode(mode: SaveLocationMode) {
+        when (mode) {
+            SaveLocationMode.MEDIA_DEFAULT -> {
+                SettingsStore.setSaveMode(this, mode)
+                refreshStorageSnapshot()
+                showMessage("Captures will be saved to the device gallery.")
+            }
+            SaveLocationMode.MEDIA_VOLUME -> {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                    showMessage("Choosing a storage volume needs Android 10+; pick a folder instead.")
+                    return
+                }
+                val volumes = StorageVolumes.list(this)
+                val selected = SettingsStore.mediaVolume(this)
+                    ?: volumes.firstOrNull { it.removable }?.name
+                    ?: volumes.firstOrNull()?.name
+                if (selected == null) {
+                    showMessage("No secondary storage was found; pick a folder instead.")
+                    return
+                }
+                SettingsStore.setMediaVolume(this, selected)
+                SettingsStore.setSaveMode(this, mode)
+                refreshStorageSnapshot()
+                showMessage("Captures will use ${SettingsStore.describeSaveLocation(this)}.")
+            }
+            SaveLocationMode.CUSTOM_FOLDER -> {
+                if (SettingsStore.treeUri(this) == null) {
+                    pickFolder()
+                } else {
+                    SettingsStore.setSaveMode(this, mode)
+                    refreshStorageSnapshot()
+                    showMessage("Captures will be saved to ${SettingsStore.describeSaveLocation(this)}.")
+                }
+            }
         }
     }
+
+    private fun selectVolume(name: String) {
+        SettingsStore.setMediaVolume(this, name)
+        SettingsStore.setSaveMode(this, SaveLocationMode.MEDIA_VOLUME)
+        refreshStorageSnapshot()
+        showMessage("Captures will use ${SettingsStore.describeSaveLocation(this)}.")
+    }
+
+    private fun pickFolder() {
+        runCatching { folderLauncher.launch(null) }
+            .onFailure { showMessage("Could not open the folder picker.") }
+    }
+
+    private fun setProjectionScope(scope: ProjectionScope) {
+        SettingsStore.setProjectionScope(this, scope)
+        refreshStorageSnapshot()
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            showMessage("This device always shares the whole screen; the choice matters on Android 14+.")
+        }
+    }
+
+    // ------------------------------------------------------------------ floating control
 
     private fun enableFloatingOverlay() {
-        markOverlayIntroSeen()
+        SettingsStore.markOverlayIntroSeen(this)
         if (!Settings.canDrawOverlays(this)) {
             overlaySettingsPending = true
             requestOverlaySettings()
@@ -639,8 +652,7 @@ class MainActivity : ComponentActivity() {
         }
         runCatching { FloatingOverlayService.show(this) }
             .onSuccess {
-                getSharedPreferences(CaptureContract.PREFS_NAME, MODE_PRIVATE).edit()
-                    .putBoolean(CaptureContract.PREF_OVERLAY_ENABLED, true).apply()
+                SettingsStore.setOverlayEnabled(this, true)
                 viewModel.update { it.copy(overlayPermission = true, overlayEnabled = true) }
             }
             .onFailure { showMessage("Could not show the floating control.") }
@@ -648,15 +660,11 @@ class MainActivity : ComponentActivity() {
 
     private fun disableFloatingOverlay() {
         runCatching { FloatingOverlayService.hide(this) }
-        getSharedPreferences(CaptureContract.PREFS_NAME, MODE_PRIVATE).edit()
-            .putBoolean(CaptureContract.PREF_OVERLAY_ENABLED, false).apply()
+        SettingsStore.setOverlayEnabled(this, false)
         viewModel.update { it.copy(overlayEnabled = false) }
     }
 
-    private fun markOverlayIntroSeen() {
-        getSharedPreferences(CaptureContract.PREFS_NAME, MODE_PRIVATE).edit()
-            .putBoolean("overlay_intro_seen", true).apply()
-    }
+    // ------------------------------------------------------------------ helpers
 
     private fun runWithPermissions(
         required: List<String>,
@@ -674,25 +682,23 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun resumePermissionFlow(flow: String?) {
-        when (flow) {
-            "screen:screenshot" -> continueScreenCaptureAfterPermissions("screenshot")
-            "screen:screen_recording" -> continueScreenCaptureAfterPermissions("screen_recording")
-            "camera_recording" -> continueCameraRecordingAfterPermissions()
-            "camera_preview" -> continueCameraPreviewAfterPermissions()
-            "microphone_on" -> continueEnableMicrophone()
+        when {
+            flow == null -> Unit
+            flow.startsWith("audio_mode:") -> {
+                val mode = CaptureAudioMode.fromId(flow.substringAfter(':'))
+                if (mode != null) applyAudioMode(mode)
+            }
+            flow == "screen:${CaptureContract.MODE_SCREENSHOT}" ->
+                continueScreenCaptureAfterPermissions(CaptureContract.MODE_SCREENSHOT)
+            flow == "screen:${CaptureContract.MODE_SCREEN_RECORDING}" ->
+                continueScreenCaptureAfterPermissions(CaptureContract.MODE_SCREEN_RECORDING)
+            flow == "camera_recording" -> continueCameraRecordingAfterPermissions()
+            flow == "camera_preview" -> continueCameraPreviewAfterPermissions()
         }
     }
 
     private fun hasPermission(permission: String): Boolean =
         ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
-
-    private fun startCaptureService(intent: Intent) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            ContextCompat.startForegroundService(this, intent)
-        } else {
-            startService(intent)
-        }
-    }
 
     private fun openCapture(capture: MediaCapture) {
         val mime = if (capture.kind.isVideo) "video/mp4" else "image/png"

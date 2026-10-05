@@ -1,5 +1,6 @@
 package com.creep.screenrecorder.services
 
+import android.Manifest
 import android.app.Activity
 import android.app.Notification
 import android.app.NotificationChannel
@@ -10,6 +11,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -24,6 +26,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
+import android.os.PowerManager
 import android.os.SystemClock
 import android.util.DisplayMetrics
 import android.view.Surface
@@ -33,22 +36,30 @@ import androidx.core.content.ContextCompat
 import com.creep.screenrecorder.CaptureContract
 import com.creep.screenrecorder.MainActivity
 import com.creep.screenrecorder.R
+import com.creep.screenrecorder.data.CaptureAudioMode
 import com.creep.screenrecorder.data.CaptureKind
-import com.creep.screenrecorder.data.MediaStoreRepository
+import com.creep.screenrecorder.data.CaptureSink
+import com.creep.screenrecorder.data.SettingsStore
 import java.io.IOException
 import java.io.OutputStream
 import java.nio.ByteBuffer
-import java.text.SimpleDateFormat
-import java.util.Date
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** A fresh user-approved projection token is consumed for exactly one screenshot or video. */
+/**
+ * One user-approved capture session: a screenshot, or a screen recording.
+ *
+ * A session is a single MediaProjection consent, which Android 14+ requires per capture. The
+ * projection is stopped as soon as the capture finishes so no capture keeps running in the
+ * background, and every session has a visible notification plus Android's own screen-share chip.
+ */
 class ScreenCaptureService : Service() {
     private enum class Mode { SCREENSHOT, VIDEO }
 
     private val mainHandler by lazy { Handler(mainLooper) }
     private val screenshotClaimed = AtomicBoolean(false)
+    private val pendingLock = Any()
+    private var pendingBitmap: Bitmap? = null
     private val notificationTicker = object : Runnable {
         override fun run() {
             if (!isRecording) return
@@ -56,6 +67,7 @@ class ScreenCaptureService : Service() {
             mainHandler.postDelayed(this, 1_000L)
         }
     }
+
     private var imageThread: HandlerThread? = null
     private var imageHandler: Handler? = null
     private var imageReader: ImageReader? = null
@@ -63,18 +75,20 @@ class ScreenCaptureService : Service() {
     private var projection: MediaProjection? = null
     private var recorder: MediaRecorder? = null
     private var recorderSurface: Surface? = null
+    private var engine: ScreenRecorderEngine? = null
+    private var sink: CaptureSink? = null
     private var outputDescriptor: ParcelFileDescriptor? = null
-    private var outputUri: Uri? = null
+    private var wakeLock: PowerManager.WakeLock? = null
     private var mode: Mode? = null
     @Volatile private var sessionActive = false
     @Volatile private var finishing = false
     private var recorderStarted = false
     private var callbackRegistered = false
     private var foregroundStarted = false
-    private var microphoneEnabled = false
-    private var audioFallback = false
+    private var audioMode = CaptureAudioMode.NONE
+    private var audioNote: String? = null
     private var skippedInitialFrames = 0
-    private var startedAtElapsed = 0L
+    private var screenshotArmAtElapsed = 0L
 
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() {
@@ -105,6 +119,8 @@ class ScreenCaptureService : Service() {
         private const val NOTIFICATION_ID = 5101
         private const val MAX_VIDEO_EDGE = 1920
         private const val FRAME_RATE = 30
+        private const val SCREENSHOT_SETTLE_MS = 320L
+        private const val SCREENSHOT_FALLBACK_MS = 700L
 
         @Volatile var isActive: Boolean = false
             private set
@@ -130,6 +146,8 @@ class ScreenCaptureService : Service() {
             ACTION_STOP -> {
                 if (sessionActive) {
                     finishSession(true, null, "Recording saved.", stopProjection = true)
+                } else {
+                    stopSelf(startId)
                 }
                 return START_NOT_STICKY
             }
@@ -147,13 +165,9 @@ class ScreenCaptureService : Service() {
         recorderStarted = false
         screenshotClaimed.set(false)
         skippedInitialFrames = 0
-        outputUri = null
-        startedAtElapsed = SystemClock.elapsedRealtime()
-        val wantsAudio = mode == Mode.VIDEO && intent.getBooleanExtra(CaptureContract.EXTRA_AUDIO_ENABLED, false)
-        microphoneEnabled = wantsAudio &&
-            ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) ==
-            PackageManager.PERMISSION_GRANTED
-        audioFallback = wantsAudio && !microphoneEnabled
+        audioNote = null
+        screenshotArmAtElapsed = SystemClock.elapsedRealtime()
+        audioMode = resolveAudioMode(intent)
 
         isActive = true
         isRecording = false
@@ -161,13 +175,23 @@ class ScreenCaptureService : Service() {
         recordingStartedAt = 0L
 
         try {
-            promoteToForeground(microphoneEnabled)
+            promoteToForeground(mode == Mode.VIDEO && audioMode.requiresRecordPermission && canRecordAudio())
             broadcastState()
             startApprovedCapture(intent)
         } catch (error: Exception) {
             finishSession(false, null, describeStartupError(error), stopProjection = true)
         }
         return START_NOT_STICKY
+    }
+
+    private fun canRecordAudio(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+
+    private fun resolveAudioMode(intent: Intent): CaptureAudioMode {
+        CaptureAudioMode.fromId(intent.getStringExtra(CaptureContract.EXTRA_AUDIO_MODE))?.let { return it }
+        val legacyEnabled = intent.getBooleanExtra(CaptureContract.EXTRA_AUDIO_ENABLED, false)
+        return if (legacyEnabled) CaptureAudioMode.MICROPHONE else SettingsStore.audioMode(this)
     }
 
     @Suppress("DEPRECATION")
@@ -194,46 +218,77 @@ class ScreenCaptureService : Service() {
         if (mode == Mode.VIDEO) startVideoRecording() else startScreenshotCapture()
     }
 
-    @Suppress("DEPRECATION")
-    private fun createMediaRecorder(): MediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        MediaRecorder(this)
-    } else {
-        MediaRecorder()
-    }
+    // ------------------------------------------------------------------ recording
 
     private fun startVideoRecording() {
         val metrics = realDisplayMetrics()
         val size = videoSize(metrics.widthPixels, metrics.heightPixels)
         check(size.first >= 2 && size.second >= 2) { "Could not read the device screen dimensions." }
 
-        outputUri = MediaStoreRepository.createPending(this, CaptureKind.SCREEN_RECORDING, ".mp4")
-            ?: throw IOException("Could not create the recording in MediaStore.")
-        outputDescriptor = contentResolver.openFileDescriptor(outputUri!!, "w")
-            ?: throw IOException("Could not open the MP4 output file.")
+        val output = CaptureSink.create(this, CaptureKind.SCREEN_RECORDING, ".mp4")
+            ?: throw IOException("Could not create the recording in the chosen location.")
+        sink = output
+        acquireWakeLock()
+
+        val recordAudioGranted = canRecordAudio()
+        val effective = when {
+            !audioMode.requiresRecordPermission -> audioMode
+            !recordAudioGranted -> {
+                audioNote = "Microphone permission was missing, so this recording is silent."
+                CaptureAudioMode.NONE
+            }
+            else -> audioMode
+        }
+
+        if (effective.usesDeviceAudio) {
+            startEngineRecording(metrics, size, effective)
+        } else {
+            startMediaRecorderRecording(metrics, size, effective)
+        }
+
+        isRecording = true
+        recordingStartedAt = System.currentTimeMillis()
+        broadcastState()
+        updateNotification(recording = true)
+        mainHandler.removeCallbacks(notificationTicker)
+        mainHandler.postDelayed(notificationTicker, 1_000L)
+    }
+
+    private fun startMediaRecorderRecording(
+        metrics: DisplayMetrics,
+        size: Pair<Int, Int>,
+        effective: CaptureAudioMode,
+    ) {
+        val target = sink ?: throw IOException("Could not create the recording in the chosen location.")
+        val descriptor = target.openDescriptorForWrite(this) ?: target.openTempDescriptor()
+            ?: throw IOException("Could not open the recording file.")
+        outputDescriptor = descriptor
 
         val mediaRecorder = createMediaRecorder()
         recorder = mediaRecorder
-        if (microphoneEnabled) mediaRecorder.setAudioSource(MediaRecorder.AudioSource.MIC)
+        if (effective.usesMicrophone) mediaRecorder.setAudioSource(MediaRecorder.AudioSource.CAMCORDER)
         mediaRecorder.setVideoSource(MediaRecorder.VideoSource.SURFACE)
         mediaRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-        if (microphoneEnabled) {
+        if (effective.usesMicrophone) {
             mediaRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
             mediaRecorder.setAudioChannels(1)
-            mediaRecorder.setAudioSamplingRate(44_100)
-            mediaRecorder.setAudioEncodingBitRate(128_000)
+            mediaRecorder.setAudioSamplingRate(48_000)
+            mediaRecorder.setAudioEncodingBitRate(96_000)
         }
         mediaRecorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
         mediaRecorder.setVideoSize(size.first, size.second)
         mediaRecorder.setVideoFrameRate(FRAME_RATE)
-        val bitrate = (size.first.toLong() * size.second * 3L)
-            .coerceIn(4_000_000L, 12_000_000L).toInt()
-        mediaRecorder.setVideoEncodingBitRate(bitrate)
-        mediaRecorder.setOutputFile(outputDescriptor!!.fileDescriptor)
+        mediaRecorder.setVideoEncodingBitRate(bitrateFor(size.first, size.second))
+        mediaRecorder.setOutputFile(descriptor.fileDescriptor)
         mediaRecorder.setOnErrorListener { _, _, _ ->
             mainHandler.post {
                 if (sessionActive && !finishing) {
-                    finishSession(true, null,
-                        "The screen recorder encountered an error. Any valid video was saved.", true)
+                    finishSession(
+                        keepVideo = true,
+                        screenshot = null,
+                        message = "The screen recorder hit an error. Any valid video was saved.",
+                        stopProjection = true,
+                    )
                 }
             }
         }
@@ -253,13 +308,56 @@ class ScreenCaptureService : Service() {
 
         mediaRecorder.start()
         recorderStarted = true
-        isRecording = true
-        recordingStartedAt = System.currentTimeMillis()
-        broadcastState()
-        updateNotification(recording = true)
-        mainHandler.removeCallbacks(notificationTicker)
-        mainHandler.postDelayed(notificationTicker, 1_000L)
     }
+
+    private fun startEngineRecording(
+        metrics: DisplayMetrics,
+        size: Pair<Int, Int>,
+        effective: CaptureAudioMode,
+    ) {
+        val target = sink ?: throw IOException("Could not create the recording in the chosen location.")
+        val descriptor = target.openDescriptorForWrite(this)
+        if (descriptor != null) outputDescriptor = descriptor
+        val file = if (descriptor == null) target.tempTarget?.also { it.parentFile?.mkdirs() } else null
+        if (descriptor == null && file == null) throw IOException("Could not open the recording file.")
+
+        val screenEngine = ScreenRecorderEngine(
+            width = size.first,
+            height = size.second,
+            frameRate = FRAME_RATE,
+            bitRate = bitrateFor(size.first, size.second),
+            audioMode = effective,
+            projection = projection ?: error("Android did not provide a screen capture session."),
+            descriptor = descriptor,
+            file = file,
+            onAudioUnavailable = { note -> audioNote = note },
+        )
+        screenEngine.start()
+        engine = screenEngine
+
+        virtualDisplay = projection?.createVirtualDisplay(
+            "ScreenKit screen recording",
+            size.first,
+            size.second,
+            metrics.densityDpi,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+            screenEngine.surface,
+            null,
+            mainHandler,
+        ) ?: throw IOException("Android could not create the recording display.")
+    }
+
+    private fun bitrateFor(width: Int, height: Int): Int =
+        (width.toLong() * height * 3L).coerceIn(4_000_000L, 12_000_000L).toInt()
+
+    @Suppress("DEPRECATION")
+    private fun createMediaRecorder(): MediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        MediaRecorder(this)
+    } else {
+        MediaRecorder()
+    }
+
+    // ------------------------------------------------------------------ screenshot
 
     private fun startScreenshotCapture() {
         val metrics = realDisplayMetrics()
@@ -271,6 +369,9 @@ class ScreenCaptureService : Service() {
         imageHandler = Handler(imageThread!!.looper)
         imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3)
         imageReader!!.setOnImageAvailableListener(::onImageAvailable, imageHandler!!)
+        // Android is still dismissing its own consent sheet when the display appears, so wait a
+        // moment before accepting a frame: that is what produced screenshots of the dialog.
+        screenshotArmAtElapsed = SystemClock.elapsedRealtime() + SCREENSHOT_SETTLE_MS
         virtualDisplay = projection?.createVirtualDisplay(
             "ScreenKit screenshot",
             width,
@@ -284,10 +385,21 @@ class ScreenCaptureService : Service() {
 
         broadcastState()
         updateNotification(recording = false)
+        // A perfectly still screen may not push another frame after the settle delay, so fall back
+        // to the newest frame that arrived while the delay was running.
         mainHandler.postDelayed({
             if (sessionActive && mode == Mode.SCREENSHOT && !finishing && !screenshotClaimed.get()) {
-                finishSession(false, null,
-                    "No screen frame arrived. Please try the screenshot again.", true)
+                captureStashedScreenshot()
+            }
+        }, SCREENSHOT_SETTLE_MS + SCREENSHOT_FALLBACK_MS)
+        mainHandler.postDelayed({
+            if (sessionActive && mode == Mode.SCREENSHOT && !finishing && !screenshotClaimed.get()) {
+                finishSession(
+                    keepVideo = false,
+                    screenshot = null,
+                    message = "No screen frame arrived. Please try the screenshot again.",
+                    stopProjection = true,
+                )
             }
         }, 20_000L)
     }
@@ -300,27 +412,101 @@ class ScreenCaptureService : Service() {
             if (!sessionActive || finishing || screenshotClaimed.get()) return
             // The first buffer can be empty on some devices; use the next fresh display frame.
             if (skippedInitialFrames++ == 0) return
+            if (SystemClock.elapsedRealtime() < screenshotArmAtElapsed) {
+                stashPendingFrame(image)
+                return
+            }
             if (!screenshotClaimed.compareAndSet(false, true)) return
 
             bitmap = bitmapFromImage(image)
+            val blank = isProtectedFrame(bitmap)
             val saved = saveScreenshot(bitmap)
             mainHandler.post {
                 if (finishing) {
-                    MediaStoreRepository.delete(this, saved)
+                    sink?.discard(this)
                 } else {
-                    finishSession(false, saved, "Screenshot saved to Pictures/ScreenCapture.", true)
+                    finishSession(
+                        keepVideo = false,
+                        screenshot = saved,
+                        message = if (blank) {
+                            "Screenshot saved, but the image is blank: that screen blocks capture (secure or DRM window)."
+                        } else {
+                            "Screenshot saved to ${SettingsStore.describeSaveLocation(this@ScreenCaptureService)}."
+                        },
+                        stopProjection = true,
+                    )
                 }
             }
         } catch (_: Exception) {
             mainHandler.post {
                 if (!finishing) {
-                    finishSession(false, null,
-                        "The screenshot could not be saved. Check free storage and try again.", true)
+                    finishSession(
+                        keepVideo = false,
+                        screenshot = null,
+                        message = "The screenshot could not be saved. Check free storage and try again.",
+                        stopProjection = true,
+                    )
                 }
             }
         } finally {
             image?.close()
             bitmap?.takeUnless { it.isRecycled }?.recycle()
+        }
+    }
+
+    /** Keeps the newest frame captured during the settle delay, in case the screen then goes still. */
+    private fun stashPendingFrame(image: Image) {
+        val decoded = try {
+            bitmapFromImage(image)
+        } catch (_: Exception) {
+            return
+        }
+        synchronized(pendingLock) {
+            pendingBitmap?.takeUnless { it.isRecycled }?.recycle()
+            pendingBitmap = decoded
+        }
+    }
+
+    private fun captureStashedScreenshot() {
+        val stashed = synchronized(pendingLock) {
+            val current = pendingBitmap
+            pendingBitmap = null
+            current
+        } ?: return
+        if (!screenshotClaimed.compareAndSet(false, true)) {
+            stashed.recycle()
+            return
+        }
+        val worker = imageHandler
+        if (worker == null) {
+            stashed.recycle()
+            return
+        }
+        worker.post {
+            val blank = isProtectedFrame(stashed)
+            val saved = try {
+                saveScreenshot(stashed)
+            } catch (_: Exception) {
+                null
+            } finally {
+                stashed.recycle()
+            }
+            mainHandler.post {
+                if (finishing) {
+                    sink?.discard(this)
+                } else {
+                    finishSession(
+                        keepVideo = false,
+                        screenshot = saved,
+                        message = when {
+                            saved == null -> "The screenshot could not be saved. Check free storage and try again."
+                            blank -> "Screenshot saved, but the image is blank: that screen blocks capture (secure or DRM window)."
+                            else -> "Screenshot saved to ${SettingsStore.describeSaveLocation(this)}."
+                        },
+                        stopProjection = true,
+                    )
+                }
+            }
         }
     }
 
@@ -346,25 +532,53 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    private fun saveScreenshot(bitmap: Bitmap): Uri {
-        val uri = MediaStoreRepository.createPending(this, CaptureKind.SCREENSHOT, ".png")
-            ?: throw IOException("Could not create a screenshot file.")
-        var published = false
+    /** A fully opaque black frame means the source window is protected from capture. */
+    private fun isProtectedFrame(bitmap: Bitmap): Boolean {
+        val stepX = (bitmap.width / 12).coerceAtLeast(1)
+        val stepY = (bitmap.height / 12).coerceAtLeast(1)
+        var sampled = 0
+        var dark = 0
+        var y = stepY / 2
+        while (y < bitmap.height) {
+            var x = stepX / 2
+            while (x < bitmap.width) {
+                val pixel = bitmap.getPixel(x, y)
+                sampled++
+                if (Color.alpha(pixel) == 255 &&
+                    Color.red(pixel) == 0 && Color.green(pixel) == 0 && Color.blue(pixel) == 0
+                ) {
+                    dark++
+                }
+                x += stepX
+            }
+            y += stepY
+        }
+        return sampled > 0 && dark == sampled
+    }
+
+    private fun saveScreenshot(bitmap: Bitmap): Uri? {
+        val output = CaptureSink.create(this, CaptureKind.SCREENSHOT, ".png")
+            ?: throw IOException("Could not create the screenshot in the chosen location.")
+        sink = output
+        val stream: OutputStream = output.openStreamForWrite(this)
+            ?: throw IOException("Could not open the screenshot output file.")
+        var published: Uri? = null
         try {
-            contentResolver.openOutputStream(uri, "w")?.use { stream: OutputStream ->
-                if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)) {
+            stream.use { target ->
+                if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, target)) {
                     throw IOException("PNG compression failed.")
                 }
-                stream.flush()
-            } ?: throw IOException("Could not open the screenshot output file.")
+                target.flush()
+            }
             if (finishing) throw IOException("Capture stopped before the screenshot finished saving.")
-            if (!MediaStoreRepository.publish(this, uri)) throw IOException("Could not publish the PNG.")
-            published = true
-            return uri
+            published = output.publish(this) ?: throw IOException("Could not finish the screenshot file.")
+            return published
         } finally {
-            if (!published) MediaStoreRepository.delete(this, uri)
+            if (published == null) output.discard(this)
         }
     }
+
+    // ------------------------------------------------------------------ display helpers
 
     @Suppress("DEPRECATION")
     private fun realDisplayMetrics(): DisplayMetrics {
@@ -385,6 +599,8 @@ class ScreenCaptureService : Service() {
         return width to height
     }
 
+    // ------------------------------------------------------------------ session teardown
+
     private fun finishSession(
         keepVideo: Boolean,
         screenshot: Uri?,
@@ -399,31 +615,34 @@ class ScreenCaptureService : Service() {
 
         if (mode == Mode.VIDEO) {
             var finalized = false
-            if (recorderStarted && keepVideo) {
-                try {
-                    recorder?.stop()
-                    finalized = true
-                } catch (_: RuntimeException) {
-                    // MediaRecorder throws for clips too short to form a playable MP4.
+            val screenEngine = engine
+            if (screenEngine != null) {
+                if (keepVideo) {
+                    finalized = screenEngine.stop()
+                } else {
+                    screenEngine.abort()
                 }
+                engine = null
+            } else if (recorderStarted && keepVideo) {
+                finalized = runCatching {
+                    recorder?.stop()
+                    true
+                }.getOrDefault(false)
             }
             recorderStarted = false
-            // Disconnect the encoder surface before releasing MediaRecorder's Surface handle.
+            // Disconnect the encoder surface before releasing its producer.
             virtualDisplay?.let { runCatching { it.release() } }
             virtualDisplay = null
             releaseRecorder()
-            val uri = outputUri
-            if (finalized && uri != null && MediaStoreRepository.publish(this, uri)) {
+            val output = sink
+            resultUri = if (finalized) output?.publish(this) else null
+            if (resultUri != null) {
                 success = true
-                resultUri = uri
                 if (finalMessage == "Recording saved.") {
-                    finalMessage = "Recording saved to Movies/ScreenCapture."
-                }
-                if (audioFallback) {
-                    finalMessage += " No microphone permission was available, so it was recorded silently."
+                    finalMessage = "Recording saved to ${SettingsStore.describeSaveLocation(this)}."
                 }
             } else {
-                MediaStoreRepository.delete(this, uri)
+                output?.discard(this)
                 if (finalMessage == "Recording saved." || finalMessage.isBlank()) {
                     finalMessage = "The recording ended before a playable video could be saved."
                 }
@@ -431,15 +650,22 @@ class ScreenCaptureService : Service() {
         } else if (screenshot != null) {
             success = true
             resultUri = screenshot
-            if (outputUri != null && outputUri != screenshot) {
-                MediaStoreRepository.delete(this, outputUri)
-            }
         } else {
-            MediaStoreRepository.delete(this, outputUri)
+            sink?.discard(this)
+        }
+        sink = null
+        audioNote?.let { note ->
+            audioNote = null
+            if (success) finalMessage = "$finalMessage $note"
         }
 
         mainHandler.removeCallbacks(notificationTicker)
+        synchronized(pendingLock) {
+            pendingBitmap?.takeUnless { it.isRecycled }?.recycle()
+            pendingBitmap = null
+        }
         releaseCaptureResources(stopProjection)
+        releaseWakeLock()
         sessionActive = false
         isActive = false
         isRecording = false
@@ -487,6 +713,22 @@ class ScreenCaptureService : Service() {
         projection = null
     }
 
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        val powerManager = getSystemService(POWER_SERVICE) as PowerManager
+        wakeLock = powerManager.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "$packageName:screen-recording",
+        ).apply { acquire(6 * 60 * 60 * 1_000L) }
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let { lock -> if (lock.isHeld) runCatching { lock.release() } }
+        wakeLock = null
+    }
+
+    // ------------------------------------------------------------------ notification
+
     private fun promoteToForeground(withMicrophone: Boolean) {
         val notification = buildNotification(recording = false)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -511,7 +753,9 @@ class ScreenCaptureService : Service() {
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_capture)
             .setContentTitle(if (recording) "Screen recording" else "Screen capture")
-            .setContentText(if (recording) "${elapsedText()} · Tap Stop to save the MP4." else "Saving a screenshot…")
+            .setContentText(
+                if (recording) "${elapsedText()} · Tap Stop to save the MP4." else "Saving a screenshot…",
+            )
             .setContentIntent(contentIntent)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setOngoing(true)
