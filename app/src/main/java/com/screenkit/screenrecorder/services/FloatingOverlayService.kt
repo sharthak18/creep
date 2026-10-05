@@ -1,4 +1,4 @@
-package com.creep.screenrecorder.services
+package com.screenkit.screenrecorder.services
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -27,13 +27,13 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
-import com.creep.screenrecorder.CaptureContract
-import com.creep.screenrecorder.CaptureIntents
-import com.creep.screenrecorder.CaptureRequestActivity
-import com.creep.screenrecorder.MainActivity
-import com.creep.screenrecorder.R
-import com.creep.screenrecorder.data.CaptureAudioMode
-import com.creep.screenrecorder.data.SettingsStore
+import com.screenkit.screenrecorder.CaptureContract
+import com.screenkit.screenrecorder.CaptureIntents
+import com.screenkit.screenrecorder.CaptureRequestActivity
+import com.screenkit.screenrecorder.MainActivity
+import com.screenkit.screenrecorder.R
+import com.screenkit.screenrecorder.data.CaptureAudioMode
+import com.screenkit.screenrecorder.data.SettingsStore
 import kotlin.math.abs
 
 /**
@@ -55,6 +55,15 @@ class FloatingOverlayService : Service() {
     private var cameraPreview = false
     private var receiverRegistered = false
 
+    private var removeTargetView: FrameLayout? = null
+    private var removeTargetParams: WindowManager.LayoutParams? = null
+    private var removeTargetShown = false
+    private var isOverRemoveTarget = false
+    private var snapAnimator: android.animation.ValueAnimator? = null
+
+    private var brushOverlay: com.screenkit.screenrecorder.ui.BrushOverlay? = null
+    private var isTemporarilyHiddenForScreenshot = false
+
     private val stateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent == null) return
@@ -68,20 +77,30 @@ class FloatingOverlayService : Service() {
                     cameraPreview = intent.getBooleanExtra(CaptureContract.EXTRA_PREVIEW, false)
                     rebuildOverlay()
                 }
+                CaptureContract.ACTION_TEMPORARY_HIDE_OVERLAY -> {
+                    isTemporarilyHiddenForScreenshot = true
+                    overlayRoot?.visibility = View.INVISIBLE
+                }
+                CaptureContract.ACTION_RESTORE_OVERLAY -> {
+                    isTemporarilyHiddenForScreenshot = false
+                    overlayRoot?.visibility = View.VISIBLE
+                }
             }
         }
     }
 
     companion object {
-        const val ACTION_SHOW = "com.creep.screenrecorder.overlay.SHOW"
-        const val ACTION_HIDE = "com.creep.screenrecorder.overlay.HIDE"
-        const val ACTION_UPDATE = "com.creep.screenrecorder.overlay.UPDATE"
+        const val ACTION_SHOW = "com.screenkit.screenrecorder.overlay.SHOW"
+        const val ACTION_HIDE = "com.screenkit.screenrecorder.overlay.HIDE"
+        const val ACTION_UPDATE = "com.screenkit.screenrecorder.overlay.UPDATE"
         private const val CHANNEL_ID = "floating_controls"
         private const val NOTIFICATION_ID = 5301
-        private const val BUBBLE_DP = 54
-        private const val CELL_WIDTH_DP = 46
-        private const val CELL_HEIGHT_DP = 48
-        private const val COLUMNS = 4
+        private const val BUBBLE_DP = 46
+        private const val CELL_WIDTH_DP = 40
+        private const val CELL_HEIGHT_DP = 42
+        private const val COLUMNS = 5
+        private const val REMOVE_TARGET_SIZE_DP = 64
+        private const val REMOVE_TARGET_MARGIN_BOTTOM_DP = 36
 
         @Volatile var isRunning: Boolean = false
             private set
@@ -105,6 +124,8 @@ class FloatingOverlayService : Service() {
         val filter = IntentFilter().apply {
             addAction(CaptureContract.ACTION_SCREEN_STATE)
             addAction(CaptureContract.ACTION_CAMERA_STATE)
+            addAction(CaptureContract.ACTION_TEMPORARY_HIDE_OVERLAY)
+            addAction(CaptureContract.ACTION_RESTORE_OVERLAY)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(stateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -196,14 +217,14 @@ class FloatingOverlayService : Service() {
         root.removeAllViews()
         root.orientation = LinearLayout.HORIZONTAL
         root.gravity = Gravity.CENTER_VERTICAL
-        root.setPadding(dp(6), dp(6), dp(6), dp(6))
+        root.setPadding(dp(5), dp(5), dp(5), dp(5))
         val background = GradientDrawable().apply {
             setColor(0xF01A2328.toInt())
-            cornerRadius = dp(23).toFloat()
+            cornerRadius = dp(20).toFloat()
             setStroke(dp(1), 0xAA50615C.toInt())
         }
         root.background = background
-        root.elevation = dp(12).toFloat()
+        root.elevation = dp(10).toFloat()
 
         val bubble = makeBubble()
         val menu = if (expanded) makeMenu() else null
@@ -229,9 +250,9 @@ class FloatingOverlayService : Service() {
 
         if (beforeWidth > 0 || expanded) {
             val estimatedWidth = if (expanded) {
-                dp(BUBBLE_DP + 4 + CELL_WIDTH_DP * COLUMNS + 12)
+                dp(BUBBLE_DP + 4 + CELL_WIDTH_DP * COLUMNS + 10)
             } else {
-                dp(BUBBLE_DP + 12)
+                dp(BUBBLE_DP + 10)
             }
             val maxX = (resources.displayMetrics.widthPixels - estimatedWidth).coerceAtLeast(0)
             params.x = params.x.coerceIn(0, maxX)
@@ -248,18 +269,33 @@ class FloatingOverlayService : Service() {
             setColor(fill)
             setStroke(dp(2), if (recordingNow) 0xFFFFD3D7.toInt() else 0xFFE1FFC0.toInt())
         }
-        val mark = TextView(this).apply {
-            text = if (recordingNow) "■" else "S"
-            textSize = if (recordingNow) 18f else 20f
-            typeface = Typeface.create("sans-serif", Typeface.BOLD)
-            setTextColor(if (recordingNow) Color.WHITE else 0xFF13200D.toInt())
-            gravity = Gravity.CENTER
-            includeFontPadding = false
+
+        if (recordingNow) {
+            val mark = TextView(this).apply {
+                text = "■"
+                textSize = 15f
+                typeface = Typeface.create("sans-serif", Typeface.BOLD)
+                setTextColor(Color.WHITE)
+                gravity = Gravity.CENTER
+                includeFontPadding = false
+            }
+            bubble.addView(mark, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ))
+        } else {
+            val iconView = android.widget.ImageView(this).apply {
+                setImageResource(R.drawable.ic_launcher)
+                scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+                val padding = dp(7)
+                setPadding(padding, padding, padding, padding)
+            }
+            bubble.addView(iconView, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ))
         }
-        bubble.addView(mark, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT,
-            FrameLayout.LayoutParams.MATCH_PARENT,
-        ))
+
         val dot = View(this).apply {
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
@@ -267,9 +303,9 @@ class FloatingOverlayService : Service() {
                 setStroke(dp(1), if (recordingNow) 0xFFE54655.toInt() else 0xFFB7F36B.toInt())
             }
         }
-        bubble.addView(dot, FrameLayout.LayoutParams(dp(11), dp(11), Gravity.TOP or Gravity.END).apply {
-            topMargin = dp(3)
-            rightMargin = dp(3)
+        bubble.addView(dot, FrameLayout.LayoutParams(dp(9), dp(9), Gravity.TOP or Gravity.END).apply {
+            topMargin = dp(2)
+            rightMargin = dp(2)
         })
         bubble.contentDescription = if (recordingNow) {
             "ScreenKit capture active. Tap for controls."
@@ -279,36 +315,38 @@ class FloatingOverlayService : Service() {
         return bubble
     }
 
-    /** Two rows of four shortcuts so every action fits on a phone without covering the screen. */
+    /** Two rows of shortcuts so every action fits on a phone without covering the screen. */
     private fun makeMenu(): LinearLayout {
         val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val soundActive = SettingsStore.audioMode(this) != CaptureAudioMode.NONE
         val rows = listOf(
             listOf(
-                MenuAction("▧", "Shot", CaptureContract.COMMAND_SCREENSHOT, false),
+                MenuAction("▧", "Full", CaptureContract.COMMAND_SCREENSHOT, false),
+                MenuAction("✂", "Crop SS", CaptureContract.COMMAND_PARTIAL_SCREENSHOT, false),
                 MenuAction(
                     if (screenRecording) "■" else "●",
                     if (screenRecording) "Stop" else "Screen",
                     CaptureContract.COMMAND_TOGGLE_SCREEN_RECORDING,
                     screenRecording,
                 ),
+                MenuAction("✂", "Crop Rec", CaptureContract.COMMAND_PARTIAL_SCREEN_RECORDING, false),
                 MenuAction(
                     if (cameraRecording) "■" else "◉",
                     if (cameraRecording) "Stop" else "Camera",
                     CaptureContract.COMMAND_TOGGLE_CAMERA_RECORDING,
                     cameraRecording,
                 ),
+            ),
+            listOf(
+                MenuAction("✎", "Draw", CaptureContract.COMMAND_OPEN_BRUSH, brushOverlay != null),
                 MenuAction(
                     if (cameraPreview) "◉" else "◎",
                     "Lens",
                     CaptureContract.COMMAND_TOGGLE_CAMERA_OVERLAY,
                     cameraPreview,
                 ),
-            ),
-            listOf(
                 MenuAction("⇄", "Flip", CaptureContract.COMMAND_FLIP_CAMERA, false),
                 MenuAction(soundIcon(), "Sound", CaptureContract.COMMAND_CYCLE_AUDIO, soundActive),
-                MenuAction("⚙", "App", CaptureContract.COMMAND_OPEN_APP, false),
                 MenuAction("✕", "Hide", CaptureContract.COMMAND_HIDE_OVERLAY, false),
             ),
         )
@@ -384,6 +422,10 @@ class FloatingOverlayService : Service() {
                 hideOverlay()
                 return
             }
+            CaptureContract.COMMAND_OPEN_BRUSH -> {
+                toggleBrushOverlay()
+                return
+            }
             CaptureContract.COMMAND_FLIP_CAMERA -> {
                 flipCamera()
                 return
@@ -441,6 +483,26 @@ class FloatingOverlayService : Service() {
         rebuildOverlay()
     }
 
+    private fun toggleBrushOverlay() {
+        if (brushOverlay != null) {
+            brushOverlay?.dismiss()
+            brushOverlay = null
+            rebuildOverlay()
+        } else {
+            if (!Settings.canDrawOverlays(this)) {
+                CaptureIntents.toast(this, "Allow display over other apps to use the brush tool.")
+                return
+            }
+            brushOverlay = com.screenkit.screenrecorder.ui.BrushOverlay(this) {
+                brushOverlay = null
+                rebuildOverlay()
+            }.also {
+                it.show()
+            }
+            rebuildOverlay()
+        }
+    }
+
     private fun hideOverlay() {
         SettingsStore.setOverlayEnabled(this, false)
         removeOverlay()
@@ -459,6 +521,96 @@ class FloatingOverlayService : Service() {
         runCatching { startActivity(intent) }
     }
 
+    private fun showRemoveTarget() {
+        if (removeTargetShown) return
+        val manager = windowManager ?: return
+        val target = FrameLayout(this)
+        val circle = FrameLayout(this).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(0xD9E54655.toInt())
+                setStroke(dp(2), Color.WHITE)
+            }
+            elevation = dp(16).toFloat()
+        }
+        val xText = TextView(this).apply {
+            text = "✕"
+            textSize = 22f
+            typeface = Typeface.create("sans-serif", Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+        }
+        circle.addView(xText, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        val circleLp = FrameLayout.LayoutParams(dp(REMOVE_TARGET_SIZE_DP), dp(REMOVE_TARGET_SIZE_DP), Gravity.CENTER)
+        target.addView(circle, circleLp)
+
+        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            @Suppress("DEPRECATION")
+            WindowManager.LayoutParams.TYPE_PHONE
+        }
+        val params = WindowManager.LayoutParams(
+            dp(REMOVE_TARGET_SIZE_DP + 16),
+            dp(REMOVE_TARGET_SIZE_DP + 16),
+            type,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            y = dp(REMOVE_TARGET_MARGIN_BOTTOM_DP)
+        }
+        removeTargetView = target
+        removeTargetParams = params
+        target.alpha = 0f
+        target.scaleX = 0.5f
+        target.scaleY = 0.5f
+        runCatching {
+            manager.addView(target, params)
+            removeTargetShown = true
+            target.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(180).start()
+        }
+    }
+
+    private fun hideRemoveTarget(onHidden: (() -> Unit)? = null) {
+        if (!removeTargetShown) {
+            onHidden?.invoke()
+            return
+        }
+        val view = removeTargetView
+        val manager = windowManager
+        if (view != null && manager != null) {
+            view.animate().alpha(0f).scaleX(0.5f).scaleY(0.5f).setDuration(150).withEndAction {
+                runCatching { manager.removeView(view) }
+                removeTargetView = null
+                removeTargetParams = null
+                removeTargetShown = false
+                isOverRemoveTarget = false
+                onHidden?.invoke()
+            }.start()
+        } else {
+            removeTargetView = null
+            removeTargetParams = null
+            removeTargetShown = false
+            isOverRemoveTarget = false
+            onHidden?.invoke()
+        }
+    }
+
+    private fun updateRemoveTargetHover(hover: Boolean) {
+        if (isOverRemoveTarget == hover) return
+        isOverRemoveTarget = hover
+        val view = removeTargetView ?: return
+        if (hover) {
+            view.animate().scaleX(1.22f).scaleY(1.22f).setDuration(120).start()
+        } else {
+            view.animate().scaleX(1.0f).scaleY(1.0f).setDuration(120).start()
+        }
+    }
+
     private fun makeBubbleTouchListener(
         root: View,
         params: WindowManager.LayoutParams,
@@ -472,6 +624,7 @@ class FloatingOverlayService : Service() {
         return View.OnTouchListener { _, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
+                    snapAnimator?.cancel()
                     startX = params.x
                     startY = params.y
                     downRawX = event.rawX
@@ -482,30 +635,120 @@ class FloatingOverlayService : Service() {
                 MotionEvent.ACTION_MOVE -> {
                     val dx = (event.rawX - downRawX).toInt()
                     val dy = (event.rawY - downRawY).toInt()
-                    if (abs(dx) > slop || abs(dy) > slop) dragging = true
+                    if (abs(dx) > slop || abs(dy) > slop) {
+                        if (!dragging) {
+                            dragging = true
+                            if (expanded) {
+                                expanded = false
+                                rebuildOverlay()
+                            }
+                            showRemoveTarget()
+                        }
+                    }
                     if (dragging) {
-                        val maxX = (resources.displayMetrics.widthPixels - root.width).coerceAtLeast(0)
-                        val maxY = (resources.displayMetrics.heightPixels - root.height).coerceAtLeast(dp(28))
+                        val screenWidth = resources.displayMetrics.widthPixels
+                        val screenHeight = resources.displayMetrics.heightPixels
+                        val maxX = (screenWidth - root.width).coerceAtLeast(0)
+                        val maxY = (screenHeight - root.height).coerceAtLeast(dp(28))
                         params.x = (startX + dx).coerceIn(0, maxX)
                         params.y = (startY + dy).coerceIn(dp(28), maxY)
                         runCatching { windowManager?.updateViewLayout(root, params) }
+
+                        // Check if bubble is dragged near bottom center remove target
+                        val bubbleCenterX = params.x + root.width / 2
+                        val bubbleCenterY = params.y + root.height / 2
+                        val targetCenterX = screenWidth / 2
+                        val targetCenterY = screenHeight - dp(REMOVE_TARGET_MARGIN_BOTTOM_DP + REMOVE_TARGET_SIZE_DP / 2)
+                        val distSq = (bubbleCenterX - targetCenterX) * (bubbleCenterX - targetCenterX) +
+                            (bubbleCenterY - targetCenterY) * (bubbleCenterY - targetCenterY)
+                        val threshold = dp(68)
+                        val hovering = distSq <= threshold * threshold
+                        updateRemoveTargetHover(hovering)
                     }
                     true
                 }
-                MotionEvent.ACTION_UP -> {
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     if (dragging) {
-                        val screenWidth = resources.displayMetrics.widthPixels
-                        val maxX = (screenWidth - root.width).coerceAtLeast(0)
-                        params.x = if (params.x + root.width / 2 < screenWidth / 2) 0 else maxX
-                        runCatching { windowManager?.updateViewLayout(root, params) }
+                        val closedByDrag = isOverRemoveTarget
+                        hideRemoveTarget {
+                            if (closedByDrag) {
+                                // Requirement 5: Drag to bottom x mark closes the floating window
+                                animateBubbleDismiss(root, params)
+                            }
+                        }
+                        if (!closedByDrag) {
+                            // Snap to nearest side (left or right) with smooth spring/interpolated animation
+                            val screenWidth = resources.displayMetrics.widthPixels
+                            val maxX = (screenWidth - root.width).coerceAtLeast(0)
+                            val targetX = if (params.x + root.width / 2 < screenWidth / 2) 0 else maxX
+                            animateSnapToEdge(root, params, targetX)
+                        }
                     } else {
-                        expanded = !expanded
-                        rebuildOverlay()
+                        // Toggle menu with smooth expand/collapse animation
+                        toggleExpandedWithAnimation(root, params)
                     }
                     true
                 }
                 else -> true
             }
+        }
+    }
+
+    private fun animateSnapToEdge(root: View, params: WindowManager.LayoutParams, targetX: Int) {
+        val startX = params.x
+        snapAnimator?.cancel()
+        val animator = android.animation.ValueAnimator.ofInt(startX, targetX).apply {
+            duration = 240
+            interpolator = android.view.animation.OvershootInterpolator(0.85f)
+            addUpdateListener { va ->
+                params.x = va.animatedValue as Int
+                runCatching { windowManager?.updateViewLayout(root, params) }
+            }
+        }
+        snapAnimator = animator
+        animator.start()
+    }
+
+    private fun animateBubbleDismiss(root: View, params: WindowManager.LayoutParams) {
+        root.animate()
+            .scaleX(0.1f)
+            .scaleY(0.1f)
+            .alpha(0f)
+            .setDuration(180)
+            .withEndAction {
+                hideOverlay()
+            }
+            .start()
+    }
+
+    private fun toggleExpandedWithAnimation(root: View, params: WindowManager.LayoutParams) {
+        if (!expanded) {
+            expanded = true
+            rebuildOverlay()
+            root.alpha = 0f
+            root.scaleX = 0.88f
+            root.scaleY = 0.88f
+            root.animate()
+                .alpha(1f)
+                .scaleX(1f)
+                .scaleY(1f)
+                .setDuration(180)
+                .setInterpolator(android.view.animation.DecelerateInterpolator())
+                .start()
+        } else {
+            root.animate()
+                .alpha(0.6f)
+                .scaleX(0.92f)
+                .scaleY(0.92f)
+                .setDuration(120)
+                .withEndAction {
+                    expanded = false
+                    rebuildOverlay()
+                    root.alpha = 1f
+                    root.scaleX = 1f
+                    root.scaleY = 1f
+                }
+                .start()
         }
     }
 
@@ -564,6 +807,11 @@ class FloatingOverlayService : Service() {
     }
 
     private fun removeOverlay() {
+        snapAnimator?.cancel()
+        snapAnimator = null
+        hideRemoveTarget()
+        brushOverlay?.dismiss()
+        brushOverlay = null
         overlayRoot?.let { view -> runCatching { windowManager?.removeView(view) } }
         overlayRoot = null
         overlayParams = null

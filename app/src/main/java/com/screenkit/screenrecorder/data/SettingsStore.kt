@@ -1,4 +1,4 @@
-package com.creep.screenrecorder.data
+package com.screenkit.screenrecorder.data
 
 import android.content.Context
 import android.content.SharedPreferences
@@ -7,7 +7,7 @@ import android.os.Build
 import android.os.Environment
 import android.os.storage.StorageManager
 import android.provider.DocumentsContract
-import com.creep.screenrecorder.CaptureContract
+import com.screenkit.screenrecorder.CaptureContract
 
 /**
  * What ends up in the audio track of a recording.
@@ -124,6 +124,15 @@ internal object SettingsStore {
 
     fun markOverlayIntroSeen(context: Context) {
         prefs(context).edit().putBoolean(CaptureContract.PREF_OVERLAY_INTRO_SEEN, true).apply()
+    }
+
+    // ---------------------------------------------------------------- touches
+
+    fun showTouches(context: Context): Boolean =
+        prefs(context).getBoolean(CaptureContract.PREF_SHOW_TOUCHES, false)
+
+    fun setShowTouches(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(CaptureContract.PREF_SHOW_TOUCHES, enabled).apply()
     }
 
     // ---------------------------------------------------------------- projection scope

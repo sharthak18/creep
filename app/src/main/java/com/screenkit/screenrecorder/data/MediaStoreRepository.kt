@@ -1,4 +1,4 @@
-package com.creep.screenrecorder.data
+package com.screenkit.screenrecorder.data
 
 import android.content.ContentUris
 import android.content.ContentValues

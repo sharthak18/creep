@@ -1,4 +1,4 @@
-package com.creep.screenrecorder
+package com.screenkit.screenrecorder
 
 import android.Manifest
 import android.content.Context
@@ -9,11 +9,11 @@ import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.widget.Toast
 import androidx.core.content.ContextCompat
-import com.creep.screenrecorder.data.CaptureAudioMode
-import com.creep.screenrecorder.data.ProjectionScope
-import com.creep.screenrecorder.data.SettingsStore
-import com.creep.screenrecorder.services.CameraCaptureService
-import com.creep.screenrecorder.services.ScreenCaptureService
+import com.screenkit.screenrecorder.data.CaptureAudioMode
+import com.screenkit.screenrecorder.data.ProjectionScope
+import com.screenkit.screenrecorder.data.SettingsStore
+import com.screenkit.screenrecorder.services.CameraCaptureService
+import com.screenkit.screenrecorder.services.ScreenCaptureService
 
 /**
  * Intent builders shared by the main activity and the overlay trampoline, so a button in the
@@ -36,11 +36,17 @@ internal object CaptureIntents {
         }
     }
 
-    fun startScreenCapture(context: Context, mode: String, resultCode: Int, data: Intent): Boolean {
+    fun startScreenCapture(
+        context: Context,
+        mode: String,
+        resultCode: Int,
+        data: Intent,
+        cropRect: android.graphics.RectF? = null,
+    ): Boolean {
         val audio = SettingsStore.audioMode(context)
         val intent = Intent(context, ScreenCaptureService::class.java)
             .setAction(
-                if (mode == CaptureContract.MODE_SCREENSHOT) {
+                if (mode == CaptureContract.MODE_SCREENSHOT || mode == CaptureContract.MODE_PARTIAL_SCREENSHOT) {
                     ScreenCaptureService.ACTION_SCREENSHOT
                 } else {
                     ScreenCaptureService.ACTION_START_RECORDING
@@ -53,6 +59,12 @@ internal object CaptureIntents {
                 CaptureContract.EXTRA_AUDIO_ENABLED,
                 audio.usesMicrophone && hasPermission(context, Manifest.permission.RECORD_AUDIO),
             )
+        if (cropRect != null) {
+            intent.putExtra(CaptureContract.EXTRA_CROP_LEFT, cropRect.left)
+            intent.putExtra(CaptureContract.EXTRA_CROP_TOP, cropRect.top)
+            intent.putExtra(CaptureContract.EXTRA_CROP_RIGHT, cropRect.right)
+            intent.putExtra(CaptureContract.EXTRA_CROP_BOTTOM, cropRect.bottom)
+        }
         return startForeground(context, intent)
     }
 

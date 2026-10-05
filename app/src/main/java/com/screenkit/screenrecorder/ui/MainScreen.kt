@@ -1,4 +1,4 @@
-package com.creep.screenrecorder.ui
+package com.screenkit.screenrecorder.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -19,6 +19,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.FlipCameraAndroid
 import androidx.compose.material.icons.filled.FolderOpen
@@ -27,6 +28,7 @@ import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -62,11 +64,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
-import com.creep.screenrecorder.data.CaptureAudioMode
-import com.creep.screenrecorder.data.CaptureKind
-import com.creep.screenrecorder.data.MediaCapture
-import com.creep.screenrecorder.data.ProjectionScope
-import com.creep.screenrecorder.data.SaveLocationMode
+import com.screenkit.screenrecorder.data.CaptureAudioMode
+import com.screenkit.screenrecorder.data.CaptureKind
+import com.screenkit.screenrecorder.data.MediaCapture
+import com.screenkit.screenrecorder.data.ProjectionScope
+import com.screenkit.screenrecorder.data.SaveLocationMode
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -107,7 +109,9 @@ internal fun MainScreen(
     onEnableOverlay: () -> Unit,
     onDisableOverlay: () -> Unit,
     onTakeScreenshot: () -> Unit,
+    onTakePartialScreenshot: () -> Unit,
     onToggleScreenRecording: () -> Unit,
+    onTogglePartialScreenRecording: () -> Unit,
     onToggleCameraRecording: () -> Unit,
     onAudioModeSelected: (CaptureAudioMode) -> Unit,
     onToggleCameraOverlay: (Boolean) -> Unit,
@@ -117,6 +121,8 @@ internal fun MainScreen(
     onVolumeSelected: (String) -> Unit,
     onPickFolder: () -> Unit,
     onOpenCapture: (MediaCapture) -> Unit,
+    onToggleShowTouches: (Boolean) -> Unit,
+    onOpenBrush: () -> Unit,
 ) {
     ScreenKitTheme {
         Box(Modifier.fillMaxSize().background(Night)) {
@@ -133,10 +139,14 @@ internal fun MainScreen(
                 CaptureActions(
                     state = state,
                     onTakeScreenshot = onTakeScreenshot,
+                    onTakePartialScreenshot = onTakePartialScreenshot,
                     onToggleScreenRecording = onToggleScreenRecording,
+                    onTogglePartialScreenRecording = onTogglePartialScreenRecording,
                     onToggleCameraRecording = onToggleCameraRecording,
                     onProjectionScopeSelected = onProjectionScopeSelected,
                 )
+                BrushToolCard(onOpenBrush = onOpenBrush)
+                TouchesCard(showTouches = state.showTouches, onToggleShowTouches = onToggleShowTouches)
                 CameraCard(state, onToggleCameraOverlay, onCameraFacingSelected)
                 SoundCard(state, onAudioModeSelected)
                 SaveLocationCard(state, onSaveModeSelected, onVolumeSelected, onPickFolder)
@@ -321,7 +331,9 @@ private fun PermissionPill(name: String, granted: Boolean, modifier: Modifier = 
 private fun CaptureActions(
     state: CaptureUiState,
     onTakeScreenshot: () -> Unit,
+    onTakePartialScreenshot: () -> Unit,
     onToggleScreenRecording: () -> Unit,
+    onTogglePartialScreenRecording: () -> Unit,
     onToggleCameraRecording: () -> Unit,
     onProjectionScopeSelected: (ProjectionScope) -> Unit,
 ) {
@@ -337,41 +349,65 @@ private fun CaptureActions(
                     ActionIcon(Icons.Filled.FiberManualRecord, Color(0xFFFF6671), "rec")
                     Column(Modifier.padding(start = 12.dp).weight(1f)) {
                         Text("Screen recording", color = SoftWhite, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                        Text("H.264 MP4 · up to 1080p · 30 fps", color = Muted, fontSize = 11.sp)
+                        Text("H.264 MP4 · Full or partial area crop", color = Muted, fontSize = 11.sp)
                     }
                     if (state.screenRecording) {
                         RecordingTimer(state.screenRecordingStartedAt)
                     }
                 }
-                ActionButton(
-                    label = when {
-                        state.screenRecording -> "Stop and save recording"
-                        state.screenSessionActive -> "Screen capture in progress…"
-                        else -> "Start screen recording"
-                    },
-                    icon = if (state.screenRecording) Icons.Filled.Stop else Icons.Filled.Videocam,
-                    enabled = !state.cameraRecording && (!state.screenSessionActive || state.screenRecording),
-                    emphasized = state.screenRecording,
-                    onClick = onToggleScreenRecording,
-                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    ActionButton(
+                        label = when {
+                            state.screenRecording -> "Stop & save"
+                            state.screenSessionActive -> "Busy…"
+                            else -> "Record whole screen"
+                        },
+                        icon = if (state.screenRecording) Icons.Filled.Stop else Icons.Filled.Videocam,
+                        enabled = !state.cameraRecording && (!state.screenSessionActive || state.screenRecording),
+                        emphasized = state.screenRecording,
+                        onClick = onToggleScreenRecording,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (!state.screenRecording) {
+                        OutlinedButton(
+                            onClick = onTogglePartialScreenRecording,
+                            enabled = !state.screenSessionActive && !state.cameraRecording,
+                            shape = RoundedCornerShape(14.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Lime),
+                            modifier = Modifier.height(48.dp),
+                        ) {
+                            Text("Select area", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
                 HorizontalDivider(color = Edge.copy(alpha = 0.7f))
                 CaptureScopeRow(state, onProjectionScopeSelected)
                 HorizontalDivider(color = Edge.copy(alpha = 0.7f))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     ActionIcon(Icons.Filled.PhotoCamera, Lime, "shot")
                     Column(Modifier.padding(start = 12.dp).weight(1f)) {
-                        Text("Full-resolution screenshot", color = SoftWhite, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                        Text("PNG · Android approval required each time", color = Muted, fontSize = 11.sp)
+                        Text("Screenshot", color = SoftWhite, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                        Text("PNG · Full screen or drag to select area", color = Muted, fontSize = 11.sp)
                     }
-                    OutlinedButton(
-                        onClick = onTakeScreenshot,
-                        enabled = !state.screenSessionActive && !state.cameraRecording,
-                        shape = RoundedCornerShape(14.dp),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Lime),
-                    ) {
-                        Icon(Icons.Filled.PhotoCamera, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Capture", fontWeight = FontWeight.Bold)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        OutlinedButton(
+                            onClick = onTakePartialScreenshot,
+                            enabled = !state.screenSessionActive && !state.cameraRecording,
+                            shape = RoundedCornerShape(14.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Lime),
+                        ) {
+                            Text("Crop", fontWeight = FontWeight.Bold)
+                        }
+                        OutlinedButton(
+                            onClick = onTakeScreenshot,
+                            enabled = !state.screenSessionActive && !state.cameraRecording,
+                            shape = RoundedCornerShape(14.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Lime),
+                        ) {
+                            Icon(Icons.Filled.PhotoCamera, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Full", fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }
@@ -723,6 +759,69 @@ private fun CameraDropdown(
             DropdownMenuItem(
                 text = { Text("Front camera") },
                 onClick = { expanded = false; onSelected(CameraFacing.FRONT) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun BrushToolCard(onOpenBrush: () -> Unit) {
+    Card(
+        shape = RoundedCornerShape(21.dp),
+        colors = CardDefaults.cardColors(containerColor = Panel),
+        border = androidx.compose.foundation.BorderStroke(1.dp, Edge),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier.size(45.dp).clip(RoundedCornerShape(14.dp))
+                    .background(PanelRaised),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Filled.Edit, contentDescription = null, tint = Lime, modifier = Modifier.size(22.dp))
+            }
+            Column(Modifier.padding(start = 12.dp).weight(1f)) {
+                Text("Screen brush & drawing", color = SoftWhite, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                Text("Draw, highlight or point on screen with color options", color = Muted, fontSize = 11.sp)
+            }
+            Button(
+                onClick = onOpenBrush,
+                shape = RoundedCornerShape(13.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Lime, contentColor = Ink),
+            ) {
+                Text("Open", fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+@Composable
+private fun TouchesCard(showTouches: Boolean, onToggleShowTouches: (Boolean) -> Unit) {
+    Card(
+        shape = RoundedCornerShape(21.dp),
+        colors = CardDefaults.cardColors(containerColor = Panel),
+        border = androidx.compose.foundation.BorderStroke(1.dp, Edge),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier.size(45.dp).clip(RoundedCornerShape(14.dp))
+                    .background(PanelRaised),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Filled.TouchApp, contentDescription = null, tint = Color(0xFF8FE0C1), modifier = Modifier.size(22.dp))
+            }
+            Column(Modifier.padding(start = 12.dp).weight(1f)) {
+                Text("Show touches during recording", color = SoftWhite, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                Text("Display visual feedback circle when touching screen", color = Muted, fontSize = 11.sp)
+            }
+            Switch(
+                checked = showTouches,
+                onCheckedChange = onToggleShowTouches,
             )
         }
     }
