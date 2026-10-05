@@ -1,11 +1,11 @@
-package com.creep.screenrecorder.ui
+package com.screenkit.screenrecorder.ui
 
 import androidx.lifecycle.ViewModel
-import com.creep.screenrecorder.data.CaptureAudioMode
-import com.creep.screenrecorder.data.MediaCapture
-import com.creep.screenrecorder.data.ProjectionScope
-import com.creep.screenrecorder.data.SaveLocationMode
-import com.creep.screenrecorder.data.StorageVolumes
+import com.screenkit.screenrecorder.data.CaptureAudioMode
+import com.screenkit.screenrecorder.data.MediaCapture
+import com.screenkit.screenrecorder.data.ProjectionScope
+import com.screenkit.screenrecorder.data.SaveLocationMode
+import com.screenkit.screenrecorder.data.StorageVolumes
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -38,6 +38,7 @@ internal data class CaptureUiState(
     val cameraRecording: Boolean = false,
     val cameraPreviewVisible: Boolean = false,
     val cameraRecordingStartedAt: Long = 0L,
+    val showTouches: Boolean = false,
     val recentCaptures: List<MediaCapture> = emptyList(),
 )
 

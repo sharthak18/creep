@@ -1,4 +1,4 @@
-package com.creep.screenrecorder.services
+package com.screenkit.screenrecorder.services
 
 import android.Manifest
 import android.app.Notification
@@ -43,14 +43,14 @@ import androidx.camera.view.PreviewView
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
-import com.creep.screenrecorder.CaptureContract
-import com.creep.screenrecorder.MainActivity
-import com.creep.screenrecorder.R
-import com.creep.screenrecorder.data.CaptureKind
-import com.creep.screenrecorder.data.CaptureSink
-import com.creep.screenrecorder.data.MediaStoreRepository
-import com.creep.screenrecorder.data.SaveLocationMode
-import com.creep.screenrecorder.data.SettingsStore
+import com.screenkit.screenrecorder.CaptureContract
+import com.screenkit.screenrecorder.MainActivity
+import com.screenkit.screenrecorder.R
+import com.screenkit.screenrecorder.data.CaptureKind
+import com.screenkit.screenrecorder.data.CaptureSink
+import com.screenkit.screenrecorder.data.MediaStoreRepository
+import com.screenkit.screenrecorder.data.SaveLocationMode
+import com.screenkit.screenrecorder.data.SettingsStore
 import java.io.File
 import java.util.Locale
 import java.util.concurrent.Executor
@@ -89,12 +89,12 @@ class CameraCaptureService : LifecycleService() {
     }
 
     companion object {
-        const val ACTION_SHOW_PREVIEW = "com.creep.screenrecorder.camera.SHOW_PREVIEW"
-        const val ACTION_HIDE_PREVIEW = "com.creep.screenrecorder.camera.HIDE_PREVIEW"
-        const val ACTION_START_RECORDING = "com.creep.screenrecorder.camera.START_RECORDING"
-        const val ACTION_STOP = "com.creep.screenrecorder.camera.STOP"
-        const val ACTION_SET_AUDIO_MUTED = "com.creep.screenrecorder.camera.SET_AUDIO_MUTED"
-        const val ACTION_SET_FACING = "com.creep.screenrecorder.camera.SET_FACING"
+        const val ACTION_SHOW_PREVIEW = "com.screenkit.screenrecorder.camera.SHOW_PREVIEW"
+        const val ACTION_HIDE_PREVIEW = "com.screenkit.screenrecorder.camera.HIDE_PREVIEW"
+        const val ACTION_START_RECORDING = "com.screenkit.screenrecorder.camera.START_RECORDING"
+        const val ACTION_STOP = "com.screenkit.screenrecorder.camera.STOP"
+        const val ACTION_SET_AUDIO_MUTED = "com.screenkit.screenrecorder.camera.SET_AUDIO_MUTED"
+        const val ACTION_SET_FACING = "com.screenkit.screenrecorder.camera.SET_FACING"
 
         private const val CHANNEL_ID = "camera_capture"
         private const val NOTIFICATION_ID = 5201

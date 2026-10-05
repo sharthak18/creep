@@ -1,44 +1,126 @@
 # ScreenKit
 
-A native Android app for screen screenshots, screen recording with microphone or device audio, CameraX video capture, and a draggable floating control that never pulls the app in front of what you are doing. Captures are stored locally, either in the device media library, on a chosen storage volume such as an SD card, or in a folder you pick.
+A native, high-performance Android capture suite built with Modern Android Architecture (Jetpack Compose, CameraX, Foreground Services, MediaProjection, OpenGL ES, and MediaCodec). ScreenKit delivers screen recording with custom cropping, screenshot capture with auto-hidden overlays, live interactive brush annotation, a draggable floating camera lens, sound recording (Mic / Device Audio / Mixed), and zero cloud uploads.
 
-## Download and install
+---
 
-[⬇️ **Download the latest ScreenKit APK**](https://github.com/sharthak18/creep/releases/latest/download/ScreenKit.apk)
+## Download and Install
 
-On Android, open the downloaded APK and follow the install prompt. If Android asks, allow your browser or file manager to install unknown apps. This is a sideloadable debug build, not a Play Store release.
+[⬇️ **Download the latest ScreenKit APK**](https://github.com/sharthak18/ScreenKit/releases/latest/download/ScreenKit.apk)
 
-**No APK is published yet.** The link will work after a `v*` version tag is pushed; the Android APK workflow will build the installer and attach `ScreenKit.apk` to that GitHub Release. To create a test build without a release, open **Actions → Android APK → Run workflow** and download the `ScreenKit.apk` artifact from the completed run.
+- Compatible with **Android 7.0 (API 24) to Android 15 (API 35)**.
+- Device Audio playback capture supported on **Android 10+**.
+- Full screen scope and single-app exclusion selection supported on **Android 14+**.
+- On Android, open the downloaded APK and follow the system prompt. Allow "Install unknown apps" for your browser or file manager if prompted.
 
-## Build
+---
 
-- Open the repository in Android Studio with **JDK 17** installed.
-- Install **Android SDK Platform 35** (plus build tools 35.0.0) and let Gradle sync.
-- Run the `app` configuration on a device/emulator running **Android 7.0 (API 24) or later**. Device-audio capture needs Android 10+, the whole-screen capture scope and the single-app exclusion need Android 14+.
-- Build from a terminal with Gradle 8.9 and `gradle :app:assembleDebug`. The repository contains Kotlin DSL build files; it does not currently include the binary Gradle wrapper JAR.
+## Key Features
 
-## Features
+### 1. Smart Floating Overlay & Quick Action Bubble
+- **Non-Intrusive Quick Controls**: Operates as a system overlay bubble that never switches your active app or pulls ScreenKit to the foreground.
+- **Two-Row Responsive Menu**: Quick access to Full Screenshot, Cropped Screenshot, Full Screen Recording, Cropped Screen Recording, Camera Video, Camera Lens Overlay, Lens Flip, Audio Mode Cycling, Drawing Brush Tool, and Dismissal.
+- **Snap-to-Edge & Drag-to-Dismiss**: Smooth animated physics that snap to the nearest screen edge or smoothly dismiss into a bottom removal target.
+- **Automatic Overlay Launch**: Automatically initiates on launch once display permission is granted.
 
-- **Floating control that stays out of the way.** Actions that need no system prompt — stop a recording, flip the camera lens, hide the bubble — run inside the floating service itself. Actions that do need one (starting a capture, enabling the microphone, arming the camera preview) are launched through an invisible, animation-free activity that shows Android's own sheet and disappears. The main app screen is never brought forward, so a screenshot taken from the bubble captures the app you were using instead of ScreenKit.
-- **Screenshots.** A full-resolution RGBA frame is read from a fresh display, after a short settle delay so Android's own consent sheet is never part of the picture. PNGs go to `Pictures/ScreenCapture`. A fully blank frame is reported honestly: that means the source app is protected from capture.
-- **Screen recording.** H.264/MP4 at up to 1920 pixels on the long edge, 30 fps, with a partial wake lock so a long recording is not cut short by the CPU sleeping mid-session.
-- **Sound options.** Off, microphone, **device audio** (the sound the phone is playing, via Android's AudioPlaybackCapture), or both mixed into one AAC track. Microphone-only and silent recordings use MediaRecorder; device audio and mixed recordings are encoded with MediaCodec and muxed by MediaMuxer, because MediaRecorder cannot accept an external audio stream.
-- **Whole-screen capture scope.** On Android 14+ the screen-share sheet offers "a single app", which freezes the video as soon as you switch away. ScreenKit asks for the default display so recordings keep covering everything, and the switch in the app can hand that choice back to Android if you want it.
-- **Camera recording.** CameraX front/back video to the media library, with live mute/unmute when the microphone is enabled. The bubble's **Flip** button switches lens while a preview or a recording is running, so changing camera no longer means opening the app.
-- **Camera preview overlay.** A draggable CameraX preview window that sits over other apps and is included in a screen recording of the whole display.
-- **Save location you control.** Device gallery (default), a chosen storage **volume such as an SD card** using MediaStore's volume-aware writes so galleries still index the files, or **any folder you pick** through Android's folder picker. Folder captures are written directly there; while a recording is running the video is buffered in cache space and copied across when it finishes, because MP4 muxers need a seekable file.
-- **Notifications.** Every running capture has a persistent notification with a Stop action, and Android shows its own screen-share and microphone indicators. Nothing in this app records silently.
-- **Recent library.** Shows ScreenKit-owned captures from the media library plus anything saved in your chosen folder, and opens them in an installed viewer/player.
+### 2. Auto-Hiding Overlay for Clean Screenshots
+- **No Bubble in Screenshots**: When capturing full or cropped screenshots, ScreenKit automatically broadcasts an instant temporary hide signal to the floating bubble and all overlay tools before the display frame is captured, restoring visibility immediately after capture.
+- **Full-Resolution Capture**: Clean, untouched PNG output saved directly to your chosen destination.
 
-## What Android does not allow (and why this app cannot work around it)
+### 3. Screen Brush & Drawing Tool
+- **On-Screen Canvas Annotation**: Draw lines, highlight UI elements, point out bugs, or mark tutorial steps directly over any application on screen.
+- **Color Palette & Stroke Customization**: Multiple vibrant colors (Red, Green, Blue, Yellow, Orange, Pink, White).
+- **Undo, Eraser & Clear Screen**: Step-by-step stroke undo, precise eraser brush, and one-tap canvas clearing.
+- **Transparent Drawing Overlay**: Floating bottom control bar with a translucent drawing surface that does not interfere with the active app's layout.
 
-These are platform rules, not missing features. Every screen recorder on Android lives with them, and deliberately bypassing them would mean exploiting the OS rather than using its APIs.
+### 4. Flexible Floating Camera Overlay & Audio Toggling
+- **Live Camera Lens**: Launch a draggable live CameraX preview overlay anywhere on screen.
+- **Concurrent Screen Recording**: Freely open or close the floating camera lens *before or during* active screen recording without interruptions or restrictions.
+- **One-Tap Camera Flip**: Switch between front and back camera lenses on the fly.
+- **Flexible Sound Modes**: Toggle or cycle between:
+  - **Mute / Silent** (Video only)
+  - **Microphone** (Voiceover & commentary)
+  - **Device Audio** (Internal app and game audio via Android `AudioPlaybackCapture`)
+  - **Mixed Audio** (Simultaneous microphone and internal device sound mixed into AAC)
 
-- **Consent per capture session.** On Android 14+, a MediaProjection token is good for exactly one `createVirtualDisplay` call. Android throws a `SecurityException` if an app caches the consent result or reuses one projection for several captures. So a screenshot or a recording started from the bubble always shows Android's sheet — ScreenKit just makes sure that sheet appears without opening the app.
-- **Phone calls cannot be recorded.** Call audio never appears in the audio graphs an app is allowed to capture: Android's playback capture only exposes media, game and unknown usage streams. There is no public API for call uplink/downlink, and non-consensual call recording is illegal in many countries. Recording your own side through the speaker and the microphone is the only thing any normal app can do.
-- **Apps that opt out stay silent.** Any app can set its playback-capture policy to disallow (most streaming, banking and call apps do). Those produce silence, and their windows are usually blank too.
-- **Protected windows come out blank.** Windows marked `FLAG_SECURE` (banking, DRM, some password fields) cannot be captured by any app.
-- **Screen sharing stops when the device locks** (Android 15 QPR1+), and single-app sharing freezes anything outside the chosen app. Whole-screen scope is the setting that avoids the freeze.
-- **Camera in the background is best-effort.** Android requires camera use to begin from an eligible, user-visible flow; vendor power policies can still stop it. The app starts a camera foreground service, and reports honestly when the OS refuses.
+### 5. Touch Feedback ("Show Touches")
+- **Visual Touch Points**: Toggle "Show touches" in the settings card. ScreenKit automatically activates touch visualization or provides one-tap navigation to Android Developer Options (`Show taps` / `Show touches`).
 
-Captures are personal-use only: recording other people, or recording a device you do not own, may be illegal where you live. ScreenKit always shows a notification and an OS indicator while it captures.
+### 6. Crop Area Recording & Cropped Screenshots
+- **Area Selection Overlay**: Interactive bounding box selection to specify any sub-region of the screen.
+- **Real-Time OpenGL ES Cropping**: Cropped screen recording utilizes an internal EGL texture and OpenGL ES external OES shader pipeline (`CropSurfaceRenderer`), rendering only the specified coordinates directly into the hardware H.264 `MediaCodec` input surface.
+- **Crop Screenshots**: Saves only the selected sub-rectangle with zero padding.
+
+### 7. Custom Storage & Privacy
+- **Configurable Save Destinations**:
+  - Device MediaStore gallery (`Pictures/ScreenCapture` and `Movies/ScreenCapture`).
+  - Secondary storage volumes (SD cards) with volume-aware MediaStore indexing.
+  - Custom SAF folder chosen through Android's Storage Access Framework.
+- **Local & Private**: All encoding and saving is strictly on-device. No telemetry, no background cloud uploads.
+
+---
+
+## Technical Architecture
+
+```
+                       ┌─────────────────────────────────────────┐
+                       │          MainActivity (Compose)         │
+                       └───────────────────┬─────────────────────┘
+                                           │
+                      ┌────────────────────┴─────────────────────┐
+                      ▼                                          ▼
+     ┌──────────────────────────────────┐      ┌──────────────────────────────────┐
+     │      FloatingOverlayService      │      │       BrushOverlay / Canvas      │
+     │  - Draggable Bubble & Actions    │      │  - Custom Interactive Canvas    │
+     │  - Auto-Hide during Screenshot   │      │  - Color & Undo Management       │
+     └────────────────┬─────────────────┘      └──────────────────────────────────┘
+                      │
+                      ▼
+     ┌──────────────────────────────────┐      ┌──────────────────────────────────┐
+     │      CaptureRequestActivity      │      │       CameraCaptureService       │
+     │  - Transparent Permission Hop    │◄────►│  - CameraX Video & Preview       │
+     │  - Per-Capture Consent Sheets    │      │  - Overlay Draggable Window      │
+     └────────────────┬─────────────────┘      └──────────────────────────────────┘
+                      │
+                      ▼
+     ┌──────────────────────────────────────────────────────────┐
+     │                  ScreenCaptureService                    │
+     │  - MediaProjection Display Feeding                       │
+     │  - CropSurfaceRenderer (EGL14 + GLES20 Texture Crop)     │
+     │  - MediaCodec + MediaMuxer (AudioPlaybackCapture Engine) │
+     │  - ImageReader Frame Pipeline for Clean Screenshots      │
+     └──────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Platform Limitations & Android Security Constraints
+
+ScreenKit is built on standard Android APIs without compromising OS integrity or requiring root access:
+
+- **Per-Capture Consent**: On Android 14+ (API 34+), MediaProjection tokens cannot be reused for multiple capture sessions by system security design. ScreenKit streamlines this by hosting consent flows in a transient, zero-animation activity so the user never leaves their target application.
+- **Protected Windows (`FLAG_SECURE`)**: DRM-protected content (e.g., banking apps, copyright-protected streaming) produces blank output by Android hardware security design.
+- **Call Audio Capture**: Telephony voice calls cannot be captured via Android's internal `AudioPlaybackCapture` graph; microphone recording is used for commentary.
+- **System Settings Permissions**: Automated toggling of global system settings (such as touch feedback) requires `WRITE_SETTINGS` or Developer Options on modern Android versions. ScreenKit attempts direct programmatic configuration and offers one-tap developer options shortcuts when restricted.
+
+---
+
+## Building from Source
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/sharthak18/ScreenKit.git
+   cd ScreenKit
+   ```
+2. Open in **Android Studio Ladybug (or newer)** with **JDK 17**.
+3. Target SDK: **35**, Minimum SDK: **24**.
+4. Build debug APK:
+   ```bash
+   ./gradlew assembleDebug
+   ```
+
+---
+
+## License
+
+This project is licensed under the Apache License 2.0. See the LICENSE file for details.

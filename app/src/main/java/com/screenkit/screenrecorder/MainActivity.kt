@@ -1,4 +1,4 @@
-package com.creep.screenrecorder
+package com.screenkit.screenrecorder
 
 import android.Manifest
 import android.app.Activity
@@ -23,19 +23,19 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
-import com.creep.screenrecorder.data.CaptureAudioMode
-import com.creep.screenrecorder.data.MediaCapture
-import com.creep.screenrecorder.data.MediaStoreRepository
-import com.creep.screenrecorder.data.ProjectionScope
-import com.creep.screenrecorder.data.SaveLocationMode
-import com.creep.screenrecorder.data.SettingsStore
-import com.creep.screenrecorder.data.StorageVolumes
-import com.creep.screenrecorder.services.CameraCaptureService
-import com.creep.screenrecorder.services.FloatingOverlayService
-import com.creep.screenrecorder.services.ScreenCaptureService
-import com.creep.screenrecorder.ui.CameraFacing
-import com.creep.screenrecorder.ui.CaptureViewModel
-import com.creep.screenrecorder.ui.MainScreen
+import com.screenkit.screenrecorder.data.CaptureAudioMode
+import com.screenkit.screenrecorder.data.MediaCapture
+import com.screenkit.screenrecorder.data.MediaStoreRepository
+import com.screenkit.screenrecorder.data.ProjectionScope
+import com.screenkit.screenrecorder.data.SaveLocationMode
+import com.screenkit.screenrecorder.data.SettingsStore
+import com.screenkit.screenrecorder.data.StorageVolumes
+import com.screenkit.screenrecorder.services.CameraCaptureService
+import com.screenkit.screenrecorder.services.FloatingOverlayService
+import com.screenkit.screenrecorder.services.ScreenCaptureService
+import com.screenkit.screenrecorder.ui.CameraFacing
+import com.screenkit.screenrecorder.ui.CaptureViewModel
+import com.screenkit.screenrecorder.ui.MainScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -48,6 +48,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var folderLauncher: ActivityResultLauncher<Uri?>
 
     private var pendingProjectionMode: String? = null
+    private var pendingCropRect: android.graphics.RectF? = null
     private var pendingPermissionFlow: String? = null
     private var pendingPermissionAction: (() -> Unit)? = null
     private var overlaySettingsPending = false
@@ -137,12 +138,14 @@ class MainActivity : ComponentActivity() {
         ) { result ->
             val mode = pendingProjectionMode
             pendingProjectionMode = null
+            val crop = pendingCropRect
+            pendingCropRect = null
             val data = result.data
             if (result.resultCode != Activity.RESULT_OK || data == null || mode == null) {
                 showMessage("Screen capture was cancelled.")
                 return@registerForActivityResult
             }
-            if (!CaptureIntents.startScreenCapture(this, mode, result.resultCode, data)) {
+            if (!CaptureIntents.startScreenCapture(this, mode, result.resultCode, data, crop)) {
                 showMessage("Could not start the screen capture. Please try again.")
             }
         }
@@ -195,7 +198,9 @@ class MainActivity : ComponentActivity() {
                 },
                 onDisableOverlay = { disableFloatingOverlay() },
                 onTakeScreenshot = { requestScreenCapture(CaptureContract.MODE_SCREENSHOT) },
+                onTakePartialScreenshot = { requestPartialScreenCapture(CaptureContract.MODE_PARTIAL_SCREENSHOT) },
                 onToggleScreenRecording = { toggleScreenRecording() },
+                onTogglePartialScreenRecording = { togglePartialScreenRecording() },
                 onToggleCameraRecording = { toggleCameraRecording() },
                 onAudioModeSelected = { mode -> setAudioMode(mode) },
                 onToggleCameraOverlay = { enabled -> setCameraOverlayEnabled(enabled) },
@@ -205,17 +210,44 @@ class MainActivity : ComponentActivity() {
                 onVolumeSelected = { name -> selectVolume(name) },
                 onPickFolder = { pickFolder() },
                 onOpenCapture = { capture -> openCapture(capture) },
+                onToggleShowTouches = { enabled -> setShowTouches(enabled) },
+                onOpenBrush = { com.screenkit.screenrecorder.ui.BrushOverlay(this).show() },
             )
         }
 
         val introAlreadySeen = SettingsStore.overlayIntroSeen(this)
         if (!introAlreadySeen && !Settings.canDrawOverlays(this)) {
             showOverlayWelcome = true
-        } else if (Settings.canDrawOverlays(this) &&
-            (!introAlreadySeen || SettingsStore.overlayEnabled(this))
-        ) {
+        } else if (Settings.canDrawOverlays(this)) {
             SettingsStore.markOverlayIntroSeen(this)
+            SettingsStore.setOverlayEnabled(this, true)
             overlayAutoStartPending = true
+        }
+
+        // Automatic permission flow on first launch for a frictionless experience
+        requestInitialPermissionsAutomatically()
+    }
+
+    private fun requestInitialPermissionsAutomatically() {
+        val needed = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            !hasPermission(Manifest.permission.POST_NOTIFICATIONS)
+        ) {
+            needed.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        if (!hasPermission(Manifest.permission.RECORD_AUDIO)) {
+            needed.add(Manifest.permission.RECORD_AUDIO)
+        }
+        if (!hasPermission(Manifest.permission.CAMERA)) {
+            needed.add(Manifest.permission.CAMERA)
+        }
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
+            !hasPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        ) {
+            needed.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        }
+        if (needed.isNotEmpty()) {
+            permissionLauncher.launch(needed.toTypedArray())
         }
     }
 
@@ -253,10 +285,11 @@ class MainActivity : ComponentActivity() {
         refreshRecentMedia()
         continueAfterOverlaySettings()
         val shouldRestoreOverlay = SettingsStore.overlayEnabled(this)
-        if (overlayAutoStartPending || (shouldRestoreOverlay && Settings.canDrawOverlays(this) &&
+        if (overlayAutoStartPending || (Settings.canDrawOverlays(this) &&
                 !FloatingOverlayService.isRunning && !overlaySettingsPending)
         ) {
             overlayAutoStartPending = false
+            SettingsStore.setOverlayEnabled(this, true)
             startFloatingOverlay()
         }
     }
@@ -311,6 +344,7 @@ class MainActivity : ComponentActivity() {
                 projectionScope = SettingsStore.projectionScope(this),
                 deviceAudioSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q,
                 cameraFacing = if (SettingsStore.cameraFront(this)) CameraFacing.FRONT else CameraFacing.BACK,
+                showTouches = SettingsStore.showTouches(this),
             )
         }
     }
@@ -350,6 +384,35 @@ class MainActivity : ComponentActivity() {
     }
 
     // ------------------------------------------------------------------ screen capture
+
+    private fun requestPartialScreenCapture(mode: String) {
+        val title = if (mode == CaptureContract.MODE_PARTIAL_SCREENSHOT) {
+            "Select area for screenshot"
+        } else {
+            "Select area for recording"
+        }
+        val overlay = com.screenkit.screenrecorder.ui.AreaSelectionOverlay(
+            context = this,
+            title = title,
+            onConfirmed = { rect ->
+                pendingCropRect = rect
+                requestScreenCapture(mode)
+            },
+            onCancelled = {
+                pendingCropRect = null
+            },
+        )
+        overlay.show()
+    }
+
+    private fun togglePartialScreenRecording() {
+        val state = viewModel.state.value
+        when {
+            state.screenRecording -> stopScreenRecording()
+            state.screenSessionActive -> showMessage("A screenshot is already being saved.")
+            else -> requestPartialScreenCapture(CaptureContract.MODE_PARTIAL_SCREEN_RECORDING)
+        }
+    }
 
     private fun requestScreenCapture(mode: String) {
         val state = viewModel.state.value
@@ -612,6 +675,33 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun setShowTouches(enabled: Boolean) {
+        SettingsStore.setShowTouches(this, enabled)
+        viewModel.update { it.copy(showTouches = enabled) }
+        tryToggleSystemShowTouches(enabled)
+    }
+
+    private fun tryToggleSystemShowTouches(enabled: Boolean) {
+        val value = if (enabled) 1 else 0
+        var success = false
+        try {
+            if (Settings.System.canWrite(this)) {
+                Settings.System.putInt(contentResolver, "show_touches", value)
+                success = true
+            }
+        } catch (_: Exception) {}
+
+        if (!success && enabled) {
+            // Guide user to Developer Options if system setting is restricted by Android OS
+            showMessage("Tip: Turn on 'Show touches' / 'Show taps' in Developer Options to display touches in screen recordings.")
+            runCatching {
+                startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
+            }
+        } else if (success) {
+            showMessage(if (enabled) "Touch visualization enabled." else "Touch visualization disabled.")
+        }
+    }
+
     // ------------------------------------------------------------------ floating control
 
     private fun enableFloatingOverlay() {
@@ -690,8 +780,12 @@ class MainActivity : ComponentActivity() {
             }
             flow == "screen:${CaptureContract.MODE_SCREENSHOT}" ->
                 continueScreenCaptureAfterPermissions(CaptureContract.MODE_SCREENSHOT)
+            flow == "screen:${CaptureContract.MODE_PARTIAL_SCREENSHOT}" ->
+                continueScreenCaptureAfterPermissions(CaptureContract.MODE_PARTIAL_SCREENSHOT)
             flow == "screen:${CaptureContract.MODE_SCREEN_RECORDING}" ->
                 continueScreenCaptureAfterPermissions(CaptureContract.MODE_SCREEN_RECORDING)
+            flow == "screen:${CaptureContract.MODE_PARTIAL_SCREEN_RECORDING}" ->
+                continueScreenCaptureAfterPermissions(CaptureContract.MODE_PARTIAL_SCREEN_RECORDING)
             flow == "camera_recording" -> continueCameraRecordingAfterPermissions()
             flow == "camera_preview" -> continueCameraPreviewAfterPermissions()
         }

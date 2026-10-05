@@ -1,4 +1,4 @@
-package com.creep.screenrecorder.services
+package com.screenkit.screenrecorder.services
 
 import android.Manifest
 import android.app.Activity
@@ -33,13 +33,13 @@ import android.view.Surface
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
-import com.creep.screenrecorder.CaptureContract
-import com.creep.screenrecorder.MainActivity
-import com.creep.screenrecorder.R
-import com.creep.screenrecorder.data.CaptureAudioMode
-import com.creep.screenrecorder.data.CaptureKind
-import com.creep.screenrecorder.data.CaptureSink
-import com.creep.screenrecorder.data.SettingsStore
+import com.screenkit.screenrecorder.CaptureContract
+import com.screenkit.screenrecorder.MainActivity
+import com.screenkit.screenrecorder.R
+import com.screenkit.screenrecorder.data.CaptureAudioMode
+import com.screenkit.screenrecorder.data.CaptureKind
+import com.screenkit.screenrecorder.data.CaptureSink
+import com.screenkit.screenrecorder.data.SettingsStore
 import java.io.IOException
 import java.io.OutputStream
 import java.nio.ByteBuffer
@@ -89,6 +89,11 @@ class ScreenCaptureService : Service() {
     private var audioNote: String? = null
     private var skippedInitialFrames = 0
     private var screenshotArmAtElapsed = 0L
+    private var cropRect: android.graphics.RectF? = null
+    private var cropRenderer: CropSurfaceRenderer? = null
+    private var intermediateSurfaceTexture: android.graphics.SurfaceTexture? = null
+    private var intermediateSurface: Surface? = null
+    private var intermediateTexId: Int = 0
 
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() {
@@ -111,9 +116,9 @@ class ScreenCaptureService : Service() {
     }
 
     companion object {
-        const val ACTION_SCREENSHOT = "com.creep.screenrecorder.screen.SCREENSHOT"
-        const val ACTION_START_RECORDING = "com.creep.screenrecorder.screen.START_RECORDING"
-        const val ACTION_STOP = "com.creep.screenrecorder.screen.STOP"
+        const val ACTION_SCREENSHOT = "com.screenkit.screenrecorder.screen.SCREENSHOT"
+        const val ACTION_START_RECORDING = "com.screenkit.screenrecorder.screen.START_RECORDING"
+        const val ACTION_STOP = "com.screenkit.screenrecorder.screen.STOP"
 
         private const val CHANNEL_ID = "screen_capture"
         private const val NOTIFICATION_ID = 5101
@@ -174,6 +179,18 @@ class ScreenCaptureService : Service() {
         activeMode = if (mode == Mode.VIDEO) "screen" else "screenshot"
         recordingStartedAt = 0L
 
+        if (intent.hasExtra(CaptureContract.EXTRA_CROP_LEFT)) {
+            val left = intent.getFloatExtra(CaptureContract.EXTRA_CROP_LEFT, 0f)
+            val top = intent.getFloatExtra(CaptureContract.EXTRA_CROP_TOP, 0f)
+            val right = intent.getFloatExtra(CaptureContract.EXTRA_CROP_RIGHT, 0f)
+            val bottom = intent.getFloatExtra(CaptureContract.EXTRA_CROP_BOTTOM, 0f)
+            if (right > left && bottom > top) {
+                cropRect = android.graphics.RectF(left, top, right, bottom)
+            }
+        } else {
+            cropRect = null
+        }
+
         try {
             promoteToForeground(mode == Mode.VIDEO && audioMode.requiresRecordPermission && canRecordAudio())
             broadcastState()
@@ -222,8 +239,23 @@ class ScreenCaptureService : Service() {
 
     private fun startVideoRecording() {
         val metrics = realDisplayMetrics()
-        val size = videoSize(metrics.widthPixels, metrics.heightPixels)
+        val fullW = metrics.widthPixels
+        val fullH = metrics.heightPixels
+        val crop = cropRect
+
+        val rawCropW = if (crop != null) crop.width().toInt().coerceIn(16, fullW) else fullW
+        val rawCropH = if (crop != null) crop.height().toInt().coerceIn(16, fullH) else fullH
+        val size = videoSize(rawCropW, rawCropH)
         check(size.first >= 2 && size.second >= 2) { "Could not read the device screen dimensions." }
+
+        val uvCropRect = if (crop != null) {
+            android.graphics.RectF(
+                crop.left / fullW.toFloat(),
+                crop.top / fullH.toFloat(),
+                crop.right / fullW.toFloat(),
+                crop.bottom / fullH.toFloat(),
+            )
+        } else null
 
         val output = CaptureSink.create(this, CaptureKind.SCREEN_RECORDING, ".mp4")
             ?: throw IOException("Could not create the recording in the chosen location.")
@@ -241,9 +273,9 @@ class ScreenCaptureService : Service() {
         }
 
         if (effective.usesDeviceAudio) {
-            startEngineRecording(metrics, size, effective)
+            startEngineRecording(metrics, size, effective, uvCropRect)
         } else {
-            startMediaRecorderRecording(metrics, size, effective)
+            startMediaRecorderRecording(metrics, size, effective, uvCropRect)
         }
 
         isRecording = true
@@ -258,6 +290,7 @@ class ScreenCaptureService : Service() {
         metrics: DisplayMetrics,
         size: Pair<Int, Int>,
         effective: CaptureAudioMode,
+        uvCropRect: android.graphics.RectF?,
     ) {
         val target = sink ?: throw IOException("Could not create the recording in the chosen location.")
         val descriptor = target.openDescriptorForWrite(this) ?: target.openTempDescriptor()
@@ -295,16 +328,7 @@ class ScreenCaptureService : Service() {
         mediaRecorder.prepare()
 
         recorderSurface = mediaRecorder.surface
-        virtualDisplay = projection?.createVirtualDisplay(
-            "ScreenKit screen recording",
-            size.first,
-            size.second,
-            metrics.densityDpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            recorderSurface!!,
-            null,
-            mainHandler,
-        ) ?: throw IOException("Android could not create the recording display.")
+        setupVirtualDisplayWithCrop(metrics, size, recorderSurface!!, uvCropRect)
 
         mediaRecorder.start()
         recorderStarted = true
@@ -314,6 +338,7 @@ class ScreenCaptureService : Service() {
         metrics: DisplayMetrics,
         size: Pair<Int, Int>,
         effective: CaptureAudioMode,
+        uvCropRect: android.graphics.RectF?,
     ) {
         val target = sink ?: throw IOException("Could not create the recording in the chosen location.")
         val descriptor = target.openDescriptorForWrite(this)
@@ -335,16 +360,61 @@ class ScreenCaptureService : Service() {
         screenEngine.start()
         engine = screenEngine
 
-        virtualDisplay = projection?.createVirtualDisplay(
-            "ScreenKit screen recording",
-            size.first,
-            size.second,
-            metrics.densityDpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            screenEngine.surface,
-            null,
-            mainHandler,
-        ) ?: throw IOException("Android could not create the recording display.")
+        setupVirtualDisplayWithCrop(metrics, size, screenEngine.surface, uvCropRect)
+    }
+
+    private fun setupVirtualDisplayWithCrop(
+        metrics: DisplayMetrics,
+        targetSize: Pair<Int, Int>,
+        encoderSurface: Surface,
+        uvCropRect: android.graphics.RectF?,
+    ) {
+        if (uvCropRect != null) {
+            val renderer = CropSurfaceRenderer(
+                inputSurface = encoderSurface,
+                outputWidth = targetSize.first,
+                outputHeight = targetSize.second,
+                cropRect = uvCropRect,
+            )
+            cropRenderer = renderer
+            val texId = renderer.createOesTexture()
+            intermediateTexId = texId
+            val surfaceTexture = android.graphics.SurfaceTexture(texId).apply {
+                setDefaultBufferSize(metrics.widthPixels, metrics.heightPixels)
+            }
+            intermediateSurfaceTexture = surfaceTexture
+            val surface = Surface(surfaceTexture)
+            intermediateSurface = surface
+
+            val transformMatrix = FloatArray(16)
+            surfaceTexture.setOnFrameAvailableListener({ st ->
+                st.updateTexImage()
+                st.getTransformMatrix(transformMatrix)
+                renderer.drawFrame(texId, transformMatrix, st.timestamp)
+            }, mainHandler)
+
+            virtualDisplay = projection?.createVirtualDisplay(
+                "ScreenKit screen recording",
+                metrics.widthPixels,
+                metrics.heightPixels,
+                metrics.densityDpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                surface,
+                null,
+                mainHandler,
+            ) ?: throw IOException("Android could not create the recording display.")
+        } else {
+            virtualDisplay = projection?.createVirtualDisplay(
+                "ScreenKit screen recording",
+                targetSize.first,
+                targetSize.second,
+                metrics.densityDpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                encoderSurface,
+                null,
+                mainHandler,
+            ) ?: throw IOException("Android could not create the recording display.")
+        }
     }
 
     private fun bitrateFor(width: Int, height: Int): Int =
@@ -364,6 +434,9 @@ class ScreenCaptureService : Service() {
         val width = metrics.widthPixels
         val height = metrics.heightPixels
         require(width > 0 && height > 0) { "Could not read the device screen dimensions." }
+
+        // Hide the floating overlay window during screenshot capture
+        sendBroadcast(Intent(CaptureContract.ACTION_TEMPORARY_HIDE_OVERLAY).setPackage(packageName))
 
         imageThread = HandlerThread("ScreenKitImageWriter").also { it.start() }
         imageHandler = Handler(imageThread!!.looper)
@@ -418,7 +491,11 @@ class ScreenCaptureService : Service() {
             }
             if (!screenshotClaimed.compareAndSet(false, true)) return
 
-            bitmap = bitmapFromImage(image)
+            val rawBitmap = bitmapFromImage(image)
+            val bitmap = cropBitmapIfNeeded(rawBitmap)
+            if (bitmap != rawBitmap) {
+                rawBitmap.recycle()
+            }
             val blank = isProtectedFrame(bitmap)
             val saved = saveScreenshot(bitmap)
             mainHandler.post {
@@ -483,13 +560,18 @@ class ScreenCaptureService : Service() {
             return
         }
         worker.post {
-            val blank = isProtectedFrame(stashed)
+            val rawBitmap = stashed
+            val cropped = cropBitmapIfNeeded(rawBitmap)
+            if (cropped != rawBitmap) {
+                rawBitmap.recycle()
+            }
+            val blank = isProtectedFrame(cropped)
             val saved = try {
-                saveScreenshot(stashed)
+                saveScreenshot(cropped)
             } catch (_: Exception) {
                 null
             } finally {
-                stashed.recycle()
+                cropped.recycle()
             }
             mainHandler.post {
                 if (finishing) {
@@ -507,6 +589,22 @@ class ScreenCaptureService : Service() {
                     )
                 }
             }
+        }
+    }
+
+    private fun cropBitmapIfNeeded(src: Bitmap): Bitmap {
+        val crop = cropRect ?: return src
+        val left = crop.left.toInt().coerceIn(0, src.width - 1)
+        val top = crop.top.toInt().coerceIn(0, src.height - 1)
+        val right = crop.right.toInt().coerceIn(left + 1, src.width)
+        val bottom = crop.bottom.toInt().coerceIn(top + 1, src.height)
+        val w = right - left
+        val h = bottom - top
+        if (w <= 0 || h <= 0) return src
+        return try {
+            Bitmap.createBitmap(src, left, top, w, h)
+        } catch (_: Exception) {
+            src
         }
     }
 
@@ -674,6 +772,11 @@ class ScreenCaptureService : Service() {
         broadcastState()
         broadcastFinished(success, resultUri, finalMessage)
 
+        if (mode == Mode.SCREENSHOT) {
+            // Restore floating overlay window if it was temporarily hidden
+            sendBroadcast(Intent(CaptureContract.ACTION_RESTORE_OVERLAY).setPackage(packageName))
+        }
+
         if (foregroundStarted) {
             stopForeground(STOP_FOREGROUND_REMOVE)
             foregroundStarted = false
@@ -694,6 +797,14 @@ class ScreenCaptureService : Service() {
     }
 
     private fun releaseCaptureResources(stopProjection: Boolean) {
+        cropRenderer?.let { runCatching { it.release() } }
+        cropRenderer = null
+        intermediateSurface?.let { runCatching { it.release() } }
+        intermediateSurface = null
+        intermediateSurfaceTexture?.let { runCatching { it.release() } }
+        intermediateSurfaceTexture = null
+        intermediateTexId = 0
+
         virtualDisplay?.let { runCatching { it.release() } }
         virtualDisplay = null
         imageReader?.let { reader ->

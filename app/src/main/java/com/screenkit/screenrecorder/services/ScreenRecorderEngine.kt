@@ -1,4 +1,4 @@
-package com.creep.screenrecorder.services
+package com.screenkit.screenrecorder.services
 
 import android.media.AudioAttributes
 import android.media.AudioFormat
@@ -15,7 +15,7 @@ import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.view.Surface
 import androidx.annotation.RequiresApi
-import com.creep.screenrecorder.data.CaptureAudioMode
+import com.screenkit.screenrecorder.data.CaptureAudioMode
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder

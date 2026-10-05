@@ -1,4 +1,4 @@
-package com.creep.screenrecorder
+package com.screenkit.screenrecorder
 
 import android.Manifest
 import android.app.Activity
@@ -12,11 +12,11 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
-import com.creep.screenrecorder.data.CaptureAudioMode
-import com.creep.screenrecorder.data.SettingsStore
-import com.creep.screenrecorder.services.CameraCaptureService
-import com.creep.screenrecorder.services.FloatingOverlayService
-import com.creep.screenrecorder.services.ScreenCaptureService
+import com.screenkit.screenrecorder.data.CaptureAudioMode
+import com.screenkit.screenrecorder.data.SettingsStore
+import com.screenkit.screenrecorder.services.CameraCaptureService
+import com.screenkit.screenrecorder.services.FloatingOverlayService
+import com.screenkit.screenrecorder.services.ScreenCaptureService
 
 /**
  * The invisible hop between a tap on the floating control and Android's permission or consent
@@ -40,6 +40,9 @@ class CaptureRequestActivity : ComponentActivity() {
     private var handled = false
     private var overlaySettingsPending = false
     private val watchdog = Handler(Looper.getMainLooper())
+
+    private var pendingCropRect: android.graphics.RectF? = null
+    private var areaSelectionOverlay: com.screenkit.screenrecorder.ui.AreaSelectionOverlay? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -68,7 +71,7 @@ class CaptureRequestActivity : ComponentActivity() {
                 finishSafely()
                 return@registerForActivityResult
             }
-            if (!CaptureIntents.startScreenCapture(this, mode, result.resultCode, data)) {
+            if (!CaptureIntents.startScreenCapture(this, mode, result.resultCode, data, pendingCropRect)) {
                 CaptureIntents.toast(this, "Could not start the screen capture.")
             }
             finishSafely()
@@ -103,6 +106,16 @@ class CaptureRequestActivity : ComponentActivity() {
         handled = true
         when (command) {
             CaptureContract.COMMAND_SCREENSHOT -> requestScreenCapture(CaptureContract.MODE_SCREENSHOT)
+            CaptureContract.COMMAND_PARTIAL_SCREENSHOT -> startAreaSelection(CaptureContract.MODE_PARTIAL_SCREENSHOT)
+            CaptureContract.COMMAND_PARTIAL_SCREEN_RECORDING -> {
+                if (ScreenCaptureService.isRecording) {
+                    CaptureIntents.stopScreenCapture(this)
+                    CaptureIntents.toast(this, "Saving the screen recording…")
+                    finishSafely()
+                } else {
+                    startAreaSelection(CaptureContract.MODE_PARTIAL_SCREEN_RECORDING)
+                }
+            }
             CaptureContract.COMMAND_TOGGLE_SCREEN_RECORDING -> {
                 if (ScreenCaptureService.isRecording) {
                     CaptureIntents.stopScreenCapture(this)
@@ -141,6 +154,10 @@ class CaptureRequestActivity : ComponentActivity() {
                 FloatingOverlayService.hide(this)
                 finishSafely()
             }
+            CaptureContract.COMMAND_OPEN_BRUSH -> {
+                com.screenkit.screenrecorder.ui.BrushOverlay(this).show()
+                finishSafely()
+            }
             null -> finishSafely()
             else -> {
                 CaptureIntents.toast(this, "ScreenKit does not know that action.")
@@ -150,6 +167,27 @@ class CaptureRequestActivity : ComponentActivity() {
     }
 
     // ------------------------------------------------------------------ screen capture
+
+    private fun startAreaSelection(targetMode: String) {
+        val title = if (targetMode == CaptureContract.MODE_PARTIAL_SCREENSHOT) {
+            "Select area for screenshot"
+        } else {
+            "Select area for recording"
+        }
+        val overlay = com.screenkit.screenrecorder.ui.AreaSelectionOverlay(
+            context = this,
+            title = title,
+            onConfirmed = { rect ->
+                pendingCropRect = rect
+                requestScreenCapture(targetMode)
+            },
+            onCancelled = {
+                finishSafely()
+            },
+        )
+        areaSelectionOverlay = overlay
+        overlay.show()
+    }
 
     private fun requestScreenCapture(mode: String) {
         pendingMode = mode
