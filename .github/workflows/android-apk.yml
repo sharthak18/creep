@@ -3,6 +3,10 @@ name: Android APK
 on:
   workflow_dispatch:
   push:
+    branches:
+      # Temporary: build the verification branch on every push so compile
+      # errors surface immediately without publishing a release tag.
+      - "arena/**"
     tags:
       - "v*"
 
