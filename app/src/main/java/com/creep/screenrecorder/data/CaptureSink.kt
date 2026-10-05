@@ -52,8 +52,9 @@ internal class CaptureSink private constructor(
     }
 
     fun openStreamForWrite(context: Context): OutputStream? {
-        if (mediaUri != null) {
-            return runCatching { context.contentResolver.openOutputStream(mediaUri, "w") }.getOrNull()
+        val uri = mediaUri
+        if (uri != null) {
+            return runCatching { context.contentResolver.openOutputStream(uri, "w") }.getOrNull()
         }
         val file = tempFile ?: return null
         file.parentFile?.mkdirs()

@@ -288,7 +288,15 @@ class CameraCaptureService : LifecycleService() {
             return
         }
         try {
-            var pending = capture.output.prepareRecording(this, options)
+            // CameraX only accepts its concrete option types, never the OutputOptions base class.
+            var pending = when (options) {
+                is MediaStoreOutputOptions -> capture.output.prepareRecording(this, options)
+                is FileOutputOptions -> capture.output.prepareRecording(this, options)
+                else -> {
+                    fail("This save location cannot be used for camera video.")
+                    return
+                }
+            }
             if (audioCapable) {
                 // CameraX 1.5 supports a muted start and Recording.mute() while recording.
                 pending = pending.withAudioEnabled(audioMuted)

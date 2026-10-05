@@ -254,7 +254,7 @@ internal class ScreenRecorderEngine(
         val minimum = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_MASK, ENCODING)
         AudioRecord.Builder()
             .setAudioFormat(pcmFormat())
-            .setAudioPlaybackCaptureConfiguration(configuration)
+            .setAudioPlaybackCaptureConfig(configuration)
             .setBufferSizeInBytes(maxOf(minimum, 16 * 1_024) * 2)
             .build()
     }.getOrNull()?.takeIf { it.state == AudioRecord.STATE_INITIALIZED } ?: null
